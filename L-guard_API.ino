@@ -20,9 +20,9 @@ const char* apPassword = "12345678";
 String savedSSID = "";
 String savedPassword = "";
 
-// API Configuration
-const char* apiBaseUrl = "https://lguard-backend-service.onrender.com/api";
-String apiToken = ""; // Will be set after authentication if needed
+// NEW API Configuration - REPLACE SUPABASE
+const char* apiUrl = "https://lguard-backend-service.onrender.com";
+const char* telemetryEndpoint = "/api/v1/telemetry/ingest";
 
 // Device ID
 String deviceId = "VEHICLE_001";
@@ -53,6 +53,7 @@ String gpsBuffer = "";
 int satellitesInUse = 0;
 String utcTime = "";
 String fixQuality = "No Fix";
+float heading = 0;
 
 // Sensor variables
 float accelX = 0, accelY = 0, accelZ = 0, totalAccel = 0;
@@ -89,7 +90,7 @@ bool buzzerState = false;
 unsigned long overspeedStartTime = 0;
 bool isOverspeeding = false;
 unsigned long lastDataSend = 0;
-const unsigned long DATA_SEND_INTERVAL = 30000;
+const unsigned long DATA_SEND_INTERVAL = 30000; // Send every 30 seconds
 
 // HTML Page for WiFi Configuration
 const char index_html[] PROGMEM = R"rawliteral(
@@ -308,9 +309,8 @@ void setup() {
   Serial.println("\n\n");
   Serial.println("=======================================================");
   Serial.println("         🛡️  L-GUARD VEHICLE SAFETY SYSTEM");
-  Serial.println("              Production Version 3.0");
-  Serial.println("          Cloud Connected + WiFi Manager");
-  Serial.println("             API: lguard-backend-service");
+  Serial.println("              Production Version 4.0");
+  Serial.println("          New API Integration + WiFi Manager");
   Serial.println("=======================================================\n");
   
   // Initialize pins
@@ -368,6 +368,7 @@ void setup() {
   deviceId = preferences.getString("device_id", "VEHICLE_001");
   
   Serial.println("📱 Device ID: " + deviceId);
+  Serial.println("🔗 API Endpoint: " + String(apiUrl) + telemetryEndpoint);
   
   // Initialize I2C for MPU6050
   Wire.begin(21, 22);
@@ -415,11 +416,6 @@ void setup() {
   
   testGSM();
   
-  // Register device with API
-  if (wifiConnected) {
-    registerDeviceWithAPI();
-  }
-  
   // Initial LED states
   digitalWrite(safeLED, HIGH);
   digitalWrite(dangerLED, LOW);
@@ -463,8 +459,9 @@ void loop() {
   performAccidentDetection();
   updateStatusLEDs();
   
+  // Send telemetry data to NEW API every 30 seconds
   if (wifiConnected && (millis() - lastDataSend >= DATA_SEND_INTERVAL)) {
-    sendTrackingDataToAPI();
+    sendTelemetryToAPI();
     lastDataSend = millis();
   }
   
@@ -559,245 +556,100 @@ void handleSave() {
   }
 }
 
-// ==================== API FUNCTIONS ====================
-
-void registerDeviceWithAPI() {
-  if (!wifiConnected) return;
-  
-  Serial.println("\n📡 Registering device with API...");
-  
-  HTTPClient http;
-  String endpoint = String(apiBaseUrl) + "/devices/register";
-  http.begin(endpoint);
-  http.addHeader("Content-Type", "application/json");
-  
-  DynamicJsonDocument doc(512);
-  doc["device_id"] = deviceId;
-  doc["device_type"] = "vehicle_tracker";
-  doc["firmware_version"] = "3.0";
-  doc["emergency_contact"] = phoneNumber;
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  int httpResponseCode = http.POST(jsonString);
-  
-  if (httpResponseCode == 200 || httpResponseCode == 201) {
-    Serial.println("✅ Device registered successfully!");
-    
-    // Parse response to get token if provided
-    String response = http.getString();
-    DynamicJsonDocument responseDoc(1024);
-    deserializeJson(responseDoc, response);
-    
-    if (responseDoc.containsKey("token")) {
-      apiToken = responseDoc["token"].as<String>();
-      Serial.println("🔑 API Token received");
-    }
-  } else if (httpResponseCode == 409) {
-    Serial.println("ℹ️  Device already registered");
-  } else {
-    Serial.println("❌ Registration failed. Code: " + String(httpResponseCode));
-    Serial.println("Response: " + http.getString());
+// ========== NEW API TELEMETRY FUNCTION ==========
+void sendTelemetryToAPI() {
+  if (!wifiConnected) {
+    Serial.println("⚠️  WiFi not connected - skipping telemetry");
+    return;
   }
   
-  http.end();
-}
-
-void sendTrackingDataToAPI() {
-  if (!wifiConnected) return;
-  
   HTTPClient http;
-  String endpoint = String(apiBaseUrl) + "/tracking";
-  http.begin(endpoint);
+  String fullUrl = String(apiUrl) + String(telemetryEndpoint);
+  
+  http.begin(fullUrl);
+  http.setTimeout(30000); // 30 second timeout for cold starts
   http.addHeader("Content-Type", "application/json");
   
-  if (apiToken.length() > 0) {
-    http.addHeader("Authorization", "Bearer " + apiToken);
-  }
-  
+  // Build JSON payload according to API schema
   DynamicJsonDocument doc(1024);
-  doc["device_id"] = deviceId;
-  doc["timestamp"] = utcTime.length() > 0 ? utcTime : "N/A";
+  
+  doc["deviceId"] = deviceId;
   
   // GPS Data
   if (gpsFixed && currentLat != 0 && currentLon != 0) {
-    JsonObject location = doc.createNestedObject("location");
-    location["latitude"] = currentLat;
-    location["longitude"] = currentLon;
-    location["altitude"] = altitude;
-    location["speed"] = currentSpeed;
-    location["satellites"] = satellitesInUse;
-    location["fix_quality"] = fixQuality;
+    doc["latitude"] = currentLat;
+    doc["longitude"] = currentLon;
+  } else {
+    doc["latitude"] = 0.0;
+    doc["longitude"] = 0.0;
   }
   
-  // Sensor Data
-  JsonObject sensors = doc.createNestedObject("sensors");
-  sensors["acceleration_x"] = accelX;
-  sensors["acceleration_y"] = accelY;
-  sensors["acceleration_z"] = accelZ;
-  sensors["total_acceleration"] = totalAccel;
-  sensors["gyro_x"] = gyroX;
-  sensors["gyro_y"] = gyroY;
-  sensors["gyro_z"] = gyroZ;
-  sensors["total_gyro"] = totalGyro;
-  sensors["vibration"] = piezoValue;
+  doc["altitude"] = altitude;
+  doc["speed"] = currentSpeed;
+  doc["heading"] = heading;
   
-  // System Status
-  JsonObject status = doc.createNestedObject("status");
-  status["gsm_connected"] = gsmReady;
-  status["gps_connected"] = gpsFixed;
-  status["wifi_signal"] = WiFi.RSSI();
+  // Accelerometer Data (convert from m/s² to g if needed, MPU6050 gives m/s²)
+  doc["accelerationX"] = accelX;
+  doc["accelerationY"] = accelY;
+  doc["accelerationZ"] = accelZ;
   
+  // Gyroscope Data (rad/s)
+  doc["gyroX"] = gyroX;
+  doc["gyroY"] = gyroY;
+  doc["gyroZ"] = gyroZ;
+  
+  // Additional telemetry
+  doc["rpm"] = 0; // Not implemented yet
+  doc["engineTemp"] = 0; // Not implemented yet
+  doc["fuelLevel"] = 0; // Not implemented yet
+  doc["batteryLevel"] = 0; // Not implemented yet
+  doc["signalStrength"] = WiFi.RSSI();
+  
+  // Raw data object with additional info
+  JsonObject rawData = doc.createNestedObject("rawData");
+  rawData["totalAccel"] = totalAccel;
+  rawData["totalGyro"] = totalGyro;
+  rawData["piezoValue"] = piezoValue;
+  rawData["satellitesCount"] = satellitesInUse;
+  rawData["gpsFixQuality"] = fixQuality;
+  rawData["gsmReady"] = gsmReady;
+  rawData["accidentDetected"] = accidentDetected;
+  if (utcTime.length() > 0) {
+    rawData["utcTime"] = utcTime;
+  }
+  
+  // Serialize JSON
   String jsonString;
   serializeJson(doc, jsonString);
+  
+  // Send POST request
+  Serial.println("\n📤 Sending telemetry to API...");
+  Serial.println("URL: " + fullUrl);
+  Serial.println("Payload: " + jsonString);
   
   int httpResponseCode = http.POST(jsonString);
   
-  if (httpResponseCode == 200 || httpResponseCode == 201) {
-    Serial.println("✅ Tracking data synced to API");
-  } else if (httpResponseCode > 0) {
-    Serial.println("❌ API sync failed. Code: " + String(httpResponseCode));
-    Serial.println("Response: " + http.getString());
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    Serial.println("✅ API Response Code: " + String(httpResponseCode));
+    Serial.println("Response: " + response);
+    
+    if (httpResponseCode == 200 || httpResponseCode == 201) {
+      Serial.println("✅ Telemetry data sent successfully!");
+      // Blink safe LED to indicate successful send
+      digitalWrite(safeLED, LOW);
+      delay(100);
+      digitalWrite(safeLED, HIGH);
+    } else {
+      Serial.println("⚠️  API returned non-success code: " + String(httpResponseCode));
+    }
   } else {
-    Serial.println("❌ Connection to API failed");
+    Serial.println("❌ Failed to send telemetry. Error: " + String(httpResponseCode));
+    Serial.println("Error: " + http.errorToString(httpResponseCode));
   }
   
   http.end();
 }
-
-void sendAccidentToAPI(String accidentType) {
-  if (!wifiConnected) return;
-  
-  Serial.println("\n🚨 Sending accident data to API...");
-  
-  HTTPClient http;
-  String endpoint = String(apiBaseUrl) + "/accidents";
-  http.begin(endpoint);
-  http.addHeader("Content-Type", "application/json");
-  
-  if (apiToken.length() > 0) {
-    http.addHeader("Authorization", "Bearer " + apiToken);
-  }
-  
-  DynamicJsonDocument doc(1536);
-  doc["device_id"] = deviceId;
-  doc["accident_type"] = accidentType;
-  doc["severity"] = "HIGH";
-  doc["timestamp"] = utcTime.length() > 0 ? utcTime : "N/A";
-  
-  // Location data
-  if (gpsFixed) {
-    JsonObject location = doc.createNestedObject("location");
-    location["latitude"] = currentLat;
-    location["longitude"] = currentLon;
-    location["altitude"] = altitude;
-    location["speed_at_impact"] = currentSpeed;
-  }
-  
-  // Sensor readings at impact
-  JsonObject impact = doc.createNestedObject("impact_data");
-  impact["max_acceleration"] = totalAccel;
-  impact["max_rotation"] = totalGyro;
-  impact["vibration_level"] = piezoValue;
-  
-  if (accidentType == "SPEED_DROP") {
-    impact["speed_before"] = previousSpeed;
-    impact["speed_after"] = currentSpeed;
-    impact["speed_drop"] = previousSpeed - currentSpeed;
-  }
-  
-  // Emergency info
-  JsonObject emergency = doc.createNestedObject("emergency");
-  emergency["contact"] = phoneNumber;
-  emergency["sms_sent"] = smsSent;
-  emergency["needs_assistance"] = true;
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  int httpResponseCode = http.POST(jsonString);
-  
-  if (httpResponseCode == 200 || httpResponseCode == 201) {
-    Serial.println("✅ Accident logged to API successfully!");
-  } else {
-    Serial.println("❌ Failed to log accident. Code: " + String(httpResponseCode));
-    Serial.println("Response: " + http.getString());
-  }
-  
-  http.end();
-}
-
-void sendOverspeedEventToAPI(unsigned long duration) {
-  if (!wifiConnected) return;
-  
-  HTTPClient http;
-  String endpoint = String(apiBaseUrl) + "/overspeed";
-  http.begin(endpoint);
-  http.addHeader("Content-Type", "application/json");
-  
-  if (apiToken.length() > 0) {
-    http.addHeader("Authorization", "Bearer " + apiToken);
-  }
-  
-  DynamicJsonDocument doc(768);
-  doc["device_id"] = deviceId;
-  doc["max_speed"] = currentSpeed;
-  doc["duration_seconds"] = (int)duration;
-  doc["timestamp"] = utcTime.length() > 0 ? utcTime : "N/A";
-  
-  if (gpsFixed) {
-    JsonObject location = doc.createNestedObject("location");
-    location["latitude"] = currentLat;
-    location["longitude"] = currentLon;
-  }
-  
-  doc["warning_sent"] = true;
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  int httpResponseCode = http.POST(jsonString);
-  
-  if (httpResponseCode == 200 || httpResponseCode == 201) {
-    Serial.println("✅ Overspeed event logged to API");
-  } else {
-    Serial.println("❌ Failed to log overspeed. Code: " + String(httpResponseCode));
-  }
-  
-  http.end();
-}
-
-void updateSMSStatusInAPI() {
-  if (!wifiConnected) return;
-  
-  HTTPClient http;
-  String endpoint = String(apiBaseUrl) + "/accidents/sms-status";
-  http.begin(endpoint);
-  http.addHeader("Content-Type", "application/json");
-  
-  if (apiToken.length() > 0) {
-    http.addHeader("Authorization", "Bearer " + apiToken);
-  }
-  
-  DynamicJsonDocument doc(256);
-  doc["device_id"] = deviceId;
-  doc["sms_sent"] = true;
-  doc["timestamp"] = utcTime.length() > 0 ? utcTime : "N/A";
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  int httpResponseCode = http.PUT(jsonString);
-  
-  if (httpResponseCode == 200) {
-    Serial.println("✅ SMS status updated in API");
-  }
-  
-  http.end();
-}
-
-// ==================== END API FUNCTIONS ====================
 
 void handleOverspeedWarning() {
   if (gpsFixed && currentSpeed > OVERSPEED_THRESHOLD) {
@@ -822,11 +674,6 @@ void handleOverspeedWarning() {
     if (isOverspeeding) {
       unsigned long duration = (millis() - overspeedStartTime) / 1000;
       Serial.println("✅ Speed normalized. Duration: " + String(duration) + "s");
-      
-      if (wifiConnected && duration > 5) {
-        sendOverspeedEventToAPI(duration);
-      }
-      
       isOverspeeding = false;
     }
     
@@ -898,8 +745,9 @@ void performAccidentDetection() {
     Serial.println("Vibration: " + String(piezoValue));
     Serial.println("🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨");
     
+    // Send immediate telemetry update with accident flag
     if (wifiConnected) {
-      sendAccidentToAPI(accidentType);
+      sendTelemetryToAPI();
     }
     
     sendEmergencySMS();
@@ -1055,10 +903,6 @@ void sendEmergencySMS() {
   if (resp.indexOf("+CMGS:") >= 0) {
     Serial.println("✅ EMERGENCY SMS SENT!");
     smsSent = true;
-    
-    if (wifiConnected && accidentDetected) {
-      updateSMSStatusInAPI();
-    }
   } else {
     Serial.println("❌ SMS failed - retrying...");
   }
@@ -1134,10 +978,18 @@ void parseGPRMC(String sentence) {
   String parts[15];
   int partCount = splitString(sentence, ',', parts, 15);
   
-  if (partCount < 8 || parts[7].length() == 0) return;
+  if (partCount < 8) return;
   
-  float speedKnots = parts[7].toFloat();
-  currentSpeed = speedKnots * 1.852;
+  // Extract speed (knots) and convert to km/h
+  if (parts[7].length() > 0) {
+    float speedKnots = parts[7].toFloat();
+    currentSpeed = speedKnots * 1.852;
+  }
+  
+  // Extract heading/course
+  if (parts[8].length() > 0) {
+    heading = parts[8].toFloat();
+  }
 }
 
 int splitString(String data, char separator, String* result, int maxParts) {
