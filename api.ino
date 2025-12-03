@@ -14,7 +14,7 @@
  // Configuration
  String APN = "internet.mtn.rw";
  String PHONE_NUMBER = "+250792957781";  // Your number
- String DEVICE_ID = "RWANDA_TEST_001";
+ String DEVICE_ID = "VEHICLE_001";
  
  void setup() {
    Serial.begin(115200);
@@ -341,12 +341,12 @@
    readResponse(2000);
    
    // Enable SSL
-   modemSerial.println("AT+HTTPSSL=1");
+   modemSerial.println("AT+CHTTPSSL=1");
    delay(1000);
    readResponse(1000);
    
    // Configure SSL
-   modemSerial.println("AT+CSSLCFG=\"sslversion\",0,3");  // TLS 1.2
+   modemSerial.println("AT+CSSLCFG=\"sslversion\",1,2");  // TLS 1.2
    delay(1000);
    readResponse(1000);
    
@@ -413,7 +413,17 @@
    readResponse(1000);
    
    // Simple test data
-   String testData = "{\"deviceId\":\"" + DEVICE_ID + "\",\"test\":true,\"message\":\"Testing from Rwanda\"}";
+  String deviceId = "VEHICLE_001";
+  float lat = -1.970580;  // Example Kigali coordinates
+  float lon = 30.104430;
+  float spd = 45.50;
+  
+  String jsonData = "{";
+  jsonData += "\"deviceId\":\"" + deviceId + "\",";
+  jsonData += "\"latitude\":" + String(lat, 6) + ",";
+  jsonData += "\"longitude\":" + String(lon, 6) + ",";
+  jsonData += "\"speed\":" + String(spd, 2);
+  jsonData += "}";
    
    modemSerial.println("AT+HTTPDATA=" + String(testData.length()) + ",20000");
    delay(2000);
