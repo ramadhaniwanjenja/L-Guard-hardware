@@ -1,0 +1,1083 @@
+/*
+ * L-GUARD VEHICLE SAFETY SYSTEM v5.3 - SMART DATA TRANSMISSION
+ * 
+ * NEW: Only sends telemetry when meaningful changes are detected
+ * - Compares current vs last transmitted values
+ * - Configurable thresholds for each parameter
+ * - Reduces database bloat and cellular data usage
+ * - Always sends accident data immediately
+ */
+
+ #include <Wire.h>
+ #include <Adafruit_Sensor.h>
+ #include <Adafruit_ADXL345_U.h>
+ #include <Adafruit_MPU6050.h>
+ #include <TinyGPSPlus.h>
+ 
+ // ==================== PIN DEFINITIONS ====================
+ // SIM A7670E Modem
+ #define MODEM_RI_PIN        2
+ #define MODEM_RXD           5
+ #define MODEM_TXD           4
+ #define MODEM_PWR_PIN      15
+ #define MODEM_DTR_PIN      18
+ #define MODEM_RESET_PIN    19
+ 
+ // GP-02 GPS Module
+ #define GPS_MODULE_TX      16
+ #define GPS_MODULE_RX      17
+ 
+ // Control & Indicators
+ #define BUZZER_PIN         12
+ #define OK_BUTTON_PIN      26
+ #define MENU_BUTTON_PIN    27
+ 
+ // Sensor pins
+ #define VIBRATION_DIGITAL_PIN 32
+ #define BIKE_MONITOR_PIN   33
+ #define BATTERY_ADC_PIN    34
+ 
+ // LED pins
+ #define SAFE_LED_PIN       25
+ #define DANGER_LED_PIN     14
+ #define GPS_LED_PIN        13
+ #define GSM_LED_PIN        23
+ #define SYSTEM_LED_PIN     -1
+ 
+ // I2C Addresses
+ #define MPU6050_ADDRESS    0x69
+ 
+ // ==================== CONFIGURATION ====================
+ const char* APN = "internet.mtn.rw";
+ const char* API_URL = "https://lguard-backend-service.onrender.com/api/v1/telemetry/ingest";
+ String DEVICE_ID = "VEHICLE_001";
+ String EMERGENCY_CONTACT = "+250795613644";
+ 
+ // Detection Thresholds
+ const float ADXL345_LOW_THRESHOLD = 3.0;
+ const float ADXL345_MEDIUM_THRESHOLD = 8.0;
+ const float ADXL345_HIGH_THRESHOLD = 15.0;
+ const float MPU6050_TILT_THRESHOLD = 45.0;
+ const float MPU6050_ROLLOVER_THRESHOLD = 70.0;
+ const float GYRO_ROTATION_THRESHOLD = 3.0;
+ const float SPEED_DROP_THRESHOLD = 30.0;
+ 
+ const int ROLLOVER_STABILITY_COUNT = 3;
+ 
+ // ==================== SMART TRANSMISSION THRESHOLDS ====================
+ // Only send data if changes exceed these values
+ const float LOCATION_CHANGE_THRESHOLD = 0.0001;  // ~11 meters (0.0001 degrees)
+ const float SPEED_CHANGE_THRESHOLD = 5.0;        // 5 km/h difference
+ const float HEADING_CHANGE_THRESHOLD = 15.0;     // 15 degrees
+ const float ACCEL_CHANGE_THRESHOLD = 0.5;        // 0.5g difference
+ const float GYRO_CHANGE_THRESHOLD = 0.3;         // 0.3 rad/s difference
+ const float BATTERY_CHANGE_THRESHOLD = 5;        // 5% battery change
+ const int SATELLITE_CHANGE_THRESHOLD = 2;        // 2 satellite difference
+ 
+ // Force send interval (even if no changes) - 5 minutes
+ const unsigned long FORCE_SEND_INTERVAL = 300000;
+ 
+ // Timing intervals
+ const unsigned long GPS_UPDATE_INTERVAL = 1000;
+ const unsigned long SENSOR_READ_INTERVAL = 50;
+ const unsigned long API_SYNC_INTERVAL = 30000;
+ const unsigned long STATUS_PRINT_INTERVAL = 5000;
+ const unsigned long CANCEL_WINDOW = 10000;
+ 
+ // Battery constants
+ const float BATTERY_DIVIDER = 2.0;
+ const float ADC_MAX_VALUE = 4095.0;
+ const float ADC_REF_VOLTAGE = 3.3;
+ const float BATTERY_MIN_VOLTAGE = 3.3;
+ const float BATTERY_MAX_VOLTAGE = 4.2;
+ 
+ // ==================== OBJECTS ====================
+ Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
+ Adafruit_MPU6050 mpu;
+ TinyGPSPlus gps;
+ HardwareSerial modemSerial(1);
+ HardwareSerial gpsSerial(2);
+ 
+ // ==================== GLOBAL VARIABLES ====================
+ // GPS data
+ float currentLat = 0, currentLon = 0, altitude = 0;
+ float currentSpeed = 0, previousSpeed = 0;
+ float heading = 0;
+ bool gpsFixed = false;
+ int satellites = 0;
+ String utcTime = "";
+ 
+ // ADXL345 data
+ float adxl345X = 0, adxl345Y = 0, adxl345Z = 0, adxl345Total = 0;
+ float adxl345MaxImpact = 0;
+ 
+ // MPU6050 data
+ float mpuAccelX = 0, mpuAccelY = 0, mpuAccelZ = 0;
+ float gyroX = 0, gyroY = 0, gyroZ = 0, totalGyro = 0;
+ float pitchAngle = 0, rollAngle = 0;
+ 
+ // Transient Detection Flags
+ bool vibrationDetected = false;
+ int rolloverCount = 0;
+ 
+ // System state
+ bool accidentDetected = false;
+ bool smsSent = false;
+ bool cancelPressed = false;
+ unsigned long accidentTime = 0;
+ String accidentType = "";
+ String impactLevel = "";
+ 
+ // Modem status
+ bool modemReady = false;
+ bool gprsConnected = false;
+ bool mpuAvailable = false;
+ 
+ // Timing variables
+ unsigned long lastSensorRead = 0;
+ unsigned long lastGpsUpdate = 0;
+ unsigned long lastApiSync = 0;
+ unsigned long lastStatusPrint = 0;
+ unsigned long lastDataSent = 0;  // Track last successful transmission
+ 
+ // LED blink states
+ unsigned long lastDangerBlink = 0;
+ unsigned long lastGpsBlink = 0;
+ unsigned long lastGsmBlink = 0;
+ bool dangerLedState = false;
+ bool gpsLedState = false;
+ bool gsmLedState = false;
+ 
+ // ==================== LAST TRANSMITTED VALUES ====================
+ struct LastTransmittedData {
+   float latitude = 0;
+   float longitude = 0;
+   float speed = 0;
+   float heading = 0;
+   float accelX = 0;
+   float accelY = 0;
+   float accelZ = 0;
+   float gyroX = 0;
+   float gyroY = 0;
+   float gyroZ = 0;
+   int batteryPercent = 0;
+   int satellites = 0;
+   bool hasData = false;  // First transmission flag
+ };
+ 
+ LastTransmittedData lastTransmitted;
+ 
+ // ==================== FUNCTION PROTOTYPES ====================
+ void setupPins();
+ void setupSensors();
+ void setupGPS();
+ void setupModem();
+ bool connectGPRS();
+ void readADXL345();
+ void readMPU6050();
+ void readVibration();
+ void readGPS();
+ void checkAccident();
+ void handleCancelButton();
+ void sendEmergencySMS();
+ void sendAccidentToAPI();
+ void sendTrackingDataToAPI();
+ void updateStatusLEDs();
+ String sendATCommand(String cmd, unsigned long timeout = 1000);
+ String readModemResponse(unsigned long timeout = 2000);
+ bool httpPOST_Fixed(String jsonData);
+ float readBatteryVoltage();
+ int batteryPercentFromVoltage(float v);
+ String buildTelemetryJSON();
+ bool hasSignificantChange();  // NEW FUNCTION
+ 
+ // ==================== SETUP FUNCTIONS ====================
+ 
+ void setupPins() {
+   if (SAFE_LED_PIN >= 0) pinMode(SAFE_LED_PIN, OUTPUT);
+   if (DANGER_LED_PIN >= 0) pinMode(DANGER_LED_PIN, OUTPUT);
+   if (GPS_LED_PIN >= 0) pinMode(GPS_LED_PIN, OUTPUT);
+   if (GSM_LED_PIN >= 0) pinMode(GSM_LED_PIN, OUTPUT);
+   if (SYSTEM_LED_PIN >= 0) pinMode(SYSTEM_LED_PIN, OUTPUT);
+   pinMode(BUZZER_PIN, OUTPUT);
+ 
+   pinMode(OK_BUTTON_PIN, INPUT_PULLUP);
+   pinMode(MENU_BUTTON_PIN, INPUT_PULLUP);
+   pinMode(VIBRATION_DIGITAL_PIN, INPUT);
+   pinMode(BIKE_MONITOR_PIN, INPUT);
+   pinMode(MODEM_RI_PIN, INPUT);
+ 
+   pinMode(MODEM_PWR_PIN, OUTPUT);
+   pinMode(MODEM_DTR_PIN, OUTPUT);
+   pinMode(MODEM_RESET_PIN, OUTPUT);
+ 
+   if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, LOW);
+   if (DANGER_LED_PIN >= 0) digitalWrite(DANGER_LED_PIN, LOW);
+   if (GPS_LED_PIN >= 0) digitalWrite(GPS_LED_PIN, LOW);
+   if (GSM_LED_PIN >= 0) digitalWrite(GSM_LED_PIN, LOW);
+   if (SYSTEM_LED_PIN >= 0) digitalWrite(SYSTEM_LED_PIN, LOW);
+   digitalWrite(BUZZER_PIN, LOW);
+ 
+   digitalWrite(MODEM_PWR_PIN, LOW);
+   digitalWrite(MODEM_DTR_PIN, LOW);
+   digitalWrite(MODEM_RESET_PIN, HIGH);
+ }
+ 
+ void setupSensors() {
+   Serial.println("Initializing sensors...");
+ 
+   Wire.begin(21, 22);
+ 
+   Serial.print("  . ADXL345... ");
+   if (!accel.begin()) {
+     Serial.println("X FAILED!");
+     while (1) {
+       if (DANGER_LED_PIN >= 0) {
+         digitalWrite(DANGER_LED_PIN, HIGH);
+         delay(200);
+         digitalWrite(DANGER_LED_PIN, LOW);
+         delay(200);
+       }
+     }
+   }
+   Serial.println("OK");
+   accel.setRange(ADXL345_RANGE_16_G);
+   accel.setDataRate(ADXL345_DATARATE_400_HZ);
+ 
+   Serial.print("  . MPU6050... ");
+   if (!mpu.begin(MPU6050_ADDRESS)) {
+     Serial.println("! NOT DETECTED");
+     mpuAvailable = false;
+   } else {
+     Serial.println("OK");
+     mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+     mpuAvailable = true;
+   }
+ 
+   Serial.println("OK Sensors initialized!\n");
+ }
+ 
+ void setupGPS() {
+   Serial.println("Initializing GPS...");
+   gpsSerial.begin(9600, SERIAL_8N1, GPS_MODULE_TX, GPS_MODULE_RX);
+   Serial.println("OK GPS started\n");
+   delay(1000);
+ }
+ 
+ void setupModem() {
+   Serial.println("Initializing SIM A7670E...");
+   
+   modemSerial.begin(115200, SERIAL_8N1, MODEM_RXD, MODEM_TXD);
+   delay(2000);
+   
+   Serial.println("  . Powering on...");
+   digitalWrite(MODEM_PWR_PIN, HIGH);
+   delay(1000);
+   digitalWrite(MODEM_PWR_PIN, LOW);
+   delay(3000);
+   
+   sendATCommand("AT", 500);
+   sendATCommand("ATE0", 500);
+   
+   Serial.print("  . SIM card... ");
+   String simResp = sendATCommand("AT+CPIN?", 2000);
+   if (simResp.indexOf("READY") >= 0) {
+     Serial.println("OK");
+   } else {
+     Serial.println("X");
+     modemReady = false;
+     return;
+   }
+   
+   Serial.print("  . Network... ");
+   String netResp = sendATCommand("AT+CREG?", 2000);
+   if (netResp.indexOf("+CREG: 0,1") >= 0 || netResp.indexOf("+CREG: 0,5") >= 0) {
+     Serial.println("OK");
+     modemReady = true;
+   } else {
+     Serial.println("Waiting...");
+     delay(3000);
+     netResp = sendATCommand("AT+CREG?", 2000);
+     modemReady = (netResp.indexOf("+CREG: 0,1") >= 0 || netResp.indexOf("+CREG: 0,5") >= 0);
+   }
+   
+   sendATCommand("AT+CMGF=1", 1000);
+   Serial.println("OK Modem initialized!\n");
+ }
+ 
+ bool connectGPRS() {
+   Serial.println("Connecting to GPRS...");
+   
+   if (!modemReady) {
+     Serial.println("X Modem not ready");
+     return false;
+   }
+   
+   sendATCommand("AT+CGATT=1", 2000);
+   sendATCommand("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"", 2000);
+   
+   Serial.print("  . Activating... ");
+   String activateResp = sendATCommand("AT+CGACT=1,1", 10000);
+   
+   if (activateResp.indexOf("OK") >= 0) {
+     String ipResp = sendATCommand("AT+CGPADDR=1", 2000);
+     if (ipResp.indexOf("+CGPADDR") >= 0) {
+       Serial.println("OK");
+       gprsConnected = true;
+       return true;
+     }
+   }
+   
+   Serial.println("X Failed");
+   gprsConnected = false;
+   return false;
+ }
+ 
+ // ==================== SETUP ====================
+ void setup() {
+   Serial.begin(115200);
+   delay(2000);
+   
+   Serial.println("\n\n=========================================================");
+   Serial.println("      L-GUARD v5.3 - SMART DATA TRANSMISSION");
+   Serial.println("=========================================================\n");
+   
+   setupPins();
+   
+   for (int i = 0; i < 3; i++) {
+     if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, HIGH);
+     if (DANGER_LED_PIN >= 0) digitalWrite(DANGER_LED_PIN, HIGH);
+     if (GPS_LED_PIN >= 0) digitalWrite(GPS_LED_PIN, HIGH);
+     if (GSM_LED_PIN >= 0) digitalWrite(GSM_LED_PIN, HIGH);
+     delay(200);
+     if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, LOW);
+     if (DANGER_LED_PIN >= 0) digitalWrite(DANGER_LED_PIN, LOW);
+     if (GPS_LED_PIN >= 0) digitalWrite(GPS_LED_PIN, LOW);
+     if (GSM_LED_PIN >= 0) digitalWrite(GSM_LED_PIN, LOW);
+     delay(200);
+   }
+   
+   setupSensors();
+   setupGPS();
+   setupModem();
+   
+   if (modemReady) {
+     if (connectGPRS()) {
+       Serial.println("OK System ready!\n");
+       if (SYSTEM_LED_PIN >= 0) digitalWrite(SYSTEM_LED_PIN, HIGH);
+     } else {
+       Serial.println("! GPRS failed - SMS only\n");
+     }
+   }
+   
+   if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, HIGH);
+   
+   Serial.println("=========================================================");
+   Serial.println(" ACCIDENT DETECTION: ACTIVE");
+   Serial.println(" GPS TRACKING: ACTIVE");
+   Serial.println(" API SYNC: " + String(gprsConnected ? "SMART MODE" : "DISABLED"));
+   Serial.println(" DATA FILTER: ENABLED (saves bandwidth & database)");
+   Serial.println("=========================================================\n");
+ }
+ 
+ // ==================== MAIN LOOP ====================
+ void loop() {
+   unsigned long currentMillis = millis();
+ 
+   if (currentMillis - lastSensorRead >= SENSOR_READ_INTERVAL) {
+     readADXL345();
+     readMPU6050();
+     readVibration();
+     checkAccident();
+     lastSensorRead = currentMillis;
+   }
+ 
+   if (currentMillis - lastGpsUpdate >= GPS_UPDATE_INTERVAL) {
+     readGPS();
+     lastGpsUpdate = currentMillis;
+   }
+ 
+   // SMART TRANSMISSION: Only send if there's meaningful change
+   if (gprsConnected && currentMillis - lastApiSync >= API_SYNC_INTERVAL) {
+     // Check if we should send data
+     bool shouldSend = hasSignificantChange();
+     
+     // Force send every 5 minutes even if no changes (heartbeat)
+     bool forceSend = (currentMillis - lastDataSent >= FORCE_SEND_INTERVAL);
+     
+     if (shouldSend || forceSend) {
+       if (forceSend) {
+         Serial.println("\n⏰ Heartbeat transmission (5min interval)");
+       }
+       sendTrackingDataToAPI();
+     } else {
+       Serial.println("⏭️  No significant change - skipping transmission");
+     }
+     
+     lastApiSync = currentMillis;
+   }
+ 
+   if (accidentDetected && !smsSent) {
+     handleCancelButton();
+   }
+ 
+   updateStatusLEDs();
+ 
+   if (currentMillis - lastStatusPrint >= STATUS_PRINT_INTERVAL) {
+     if (!accidentDetected) {
+       float battV = readBatteryVoltage();
+       
+       Serial.print("OK SAFE | Impact:");
+       Serial.print(adxl345Total, 2);
+       Serial.print("g | Tilt:");
+       Serial.print(mpuAvailable ? String(rollAngle, 1) : "N/A");
+       Serial.print("deg | Speed:");
+       Serial.print(currentSpeed, 1);
+       Serial.print("km/h | GPS:");
+       Serial.print(gpsFixed ? "FIX" : "NO");
+       Serial.print(" | Bat:");
+       Serial.print(battV, 1);
+       Serial.println("V");
+     }
+     lastStatusPrint = currentMillis;
+   }
+ 
+   delay(10);
+ }
+ 
+ // ==================== SENSOR READING ====================
+ 
+ void readADXL345() {
+   sensors_event_t event;
+   accel.getEvent(&event);
+ 
+   const float MPS2_TO_G = 1.0 / 9.80665;
+   adxl345X = event.acceleration.x * MPS2_TO_G;
+   adxl345Y = event.acceleration.y * MPS2_TO_G;
+   adxl345Z = event.acceleration.z * MPS2_TO_G;
+   
+   adxl345Total = sqrt(adxl345X * adxl345X + 
+                       adxl345Y * adxl345Y + 
+                       adxl345Z * adxl345Z);
+   
+   if (adxl345Total > adxl345MaxImpact) {
+     adxl345MaxImpact = adxl345Total;
+   }
+ }
+ 
+ void readMPU6050() {
+   if (!mpuAvailable) {
+     rolloverCount = 0;
+     return;
+   }
+ 
+   sensors_event_t a, g, temp;
+   mpu.getEvent(&a, &g, &temp);
+ 
+   mpuAccelX = a.acceleration.x;
+   mpuAccelY = a.acceleration.y;
+   mpuAccelZ = a.acceleration.z;
+ 
+   gyroX = g.gyro.x;
+   gyroY = g.gyro.y;
+   gyroZ = g.gyro.z;
+   totalGyro = sqrt(gyroX * gyroX + gyroY * gyroY + gyroZ * gyroZ);
+ 
+   pitchAngle = atan2(mpuAccelY, sqrt(mpuAccelX * mpuAccelX + mpuAccelZ * mpuAccelZ)) * 180.0 / PI;
+   rollAngle = atan2(-mpuAccelX, mpuAccelZ) * 180.0 / PI;
+   
+   if (abs(rollAngle) > MPU6050_ROLLOVER_THRESHOLD || abs(pitchAngle) > MPU6050_ROLLOVER_THRESHOLD) {
+     rolloverCount = constrain(rolloverCount + 1, 0, ROLLOVER_STABILITY_COUNT);
+   } else {
+     rolloverCount = 0;
+   }
+ }
+ 
+ void readVibration() {
+   vibrationDetected = (digitalRead(VIBRATION_DIGITAL_PIN) == LOW);
+ }
+ 
+ void readGPS() {
+   while (gpsSerial.available() > 0) {
+     char c = gpsSerial.read();
+     gps.encode(c);
+   }
+ 
+   if (gps.location.isUpdated()) {
+     currentLat = gps.location.lat();
+     currentLon = gps.location.lng();
+     gpsFixed = gps.location.isValid();
+   }
+ 
+   if (gps.altitude.isUpdated()) {
+     altitude = gps.altitude.meters();
+   }
+ 
+   if (gps.speed.isUpdated()) {
+     previousSpeed = currentSpeed;
+     currentSpeed = gps.speed.kmph();
+   }
+   
+   if (gps.course.isUpdated()) {
+     heading = gps.course.deg();
+   }
+ 
+   if (gps.satellites.isUpdated()) {
+     satellites = gps.satellites.value();
+   }
+ 
+   if (gps.time.isValid()) {
+     char timeStr[16];
+     sprintf(timeStr, "%02d:%02d:%02d", gps.time.hour(), gps.time.minute(), gps.time.second());
+     utcTime = String(timeStr);
+   }
+ }
+ 
+ // ==================== CHANGE DETECTION ====================
+ 
+ bool hasSignificantChange() {
+   // First transmission always sends
+   if (!lastTransmitted.hasData) {
+     Serial.println("📍 First transmission - sending baseline data");
+     return true;
+   }
+   
+   // Check each parameter for significant change
+   bool locationChanged = false;
+   bool speedChanged = false;
+   bool headingChanged = false;
+   bool accelChanged = false;
+   bool gyroChanged = false;
+   bool batteryChanged = false;
+   bool satelliteChanged = false;
+   
+   // Location change (if GPS is valid)
+   if (gpsFixed && currentLat != 0 && currentLon != 0) {
+     float latDiff = abs(currentLat - lastTransmitted.latitude);
+     float lonDiff = abs(currentLon - lastTransmitted.longitude);
+     locationChanged = (latDiff > LOCATION_CHANGE_THRESHOLD || lonDiff > LOCATION_CHANGE_THRESHOLD);
+     if (locationChanged) {
+       Serial.println("  🗺️  Location changed by " + String(latDiff, 6) + "°, " + String(lonDiff, 6) + "°");
+     }
+   }
+   
+   // Speed change
+   float speedDiff = abs(currentSpeed - lastTransmitted.speed);
+   speedChanged = (speedDiff > SPEED_CHANGE_THRESHOLD);
+   if (speedChanged) {
+     Serial.println("  🚗 Speed changed by " + String(speedDiff, 1) + " km/h");
+   }
+   
+   // Heading change
+   float headingDiff = abs(heading - lastTransmitted.heading);
+   // Handle wraparound (359° to 1° is only 2° change, not 358°)
+   if (headingDiff > 180) headingDiff = 360 - headingDiff;
+   headingChanged = (headingDiff > HEADING_CHANGE_THRESHOLD);
+   if (headingChanged) {
+     Serial.println("  🧭 Heading changed by " + String(headingDiff, 1) + "°");
+   }
+   
+   // Acceleration change
+   float accelXDiff = abs(adxl345X - lastTransmitted.accelX);
+   float accelYDiff = abs(adxl345Y - lastTransmitted.accelY);
+   float accelZDiff = abs(adxl345Z - lastTransmitted.accelZ);
+   accelChanged = (accelXDiff > ACCEL_CHANGE_THRESHOLD || 
+                   accelYDiff > ACCEL_CHANGE_THRESHOLD || 
+                   accelZDiff > ACCEL_CHANGE_THRESHOLD);
+   if (accelChanged) {
+     Serial.println("  📊 Acceleration changed significantly");
+   }
+   
+   // Gyroscope change
+   float gyroXDiff = abs(gyroX - lastTransmitted.gyroX);
+   float gyroYDiff = abs(gyroY - lastTransmitted.gyroY);
+   float gyroZDiff = abs(gyroZ - lastTransmitted.gyroZ);
+   gyroChanged = (gyroXDiff > GYRO_CHANGE_THRESHOLD || 
+                  gyroYDiff > GYRO_CHANGE_THRESHOLD || 
+                  gyroZDiff > GYRO_CHANGE_THRESHOLD);
+   if (gyroChanged) {
+     Serial.println("  🔄 Rotation detected");
+   }
+   
+   // Battery change
+   int currentBattery = batteryPercentFromVoltage(readBatteryVoltage());
+   int batteryDiff = abs(currentBattery - lastTransmitted.batteryPercent);
+   batteryChanged = (batteryDiff >= BATTERY_CHANGE_THRESHOLD);
+   if (batteryChanged) {
+     Serial.println("  🔋 Battery changed by " + String(batteryDiff) + "%");
+   }
+   
+   // Satellite count change
+   int satDiff = abs(satellites - lastTransmitted.satellites);
+   satelliteChanged = (satDiff >= SATELLITE_CHANGE_THRESHOLD);
+   if (satelliteChanged) {
+     Serial.println("  🛰️  Satellite count changed by " + String(satDiff));
+   }
+   
+   // Return true if ANY parameter changed significantly
+   return (locationChanged || speedChanged || headingChanged || 
+           accelChanged || gyroChanged || batteryChanged || satelliteChanged);
+ }
+ 
+ // ==================== ACCIDENT DETECTION ====================
+ 
+ void checkAccident() {
+   if (accidentDetected) return;
+ 
+   bool vibrationGate = vibrationDetected;
+   bool lowImpact = (adxl345Total > ADXL345_LOW_THRESHOLD);
+   bool mediumImpact = (adxl345Total > ADXL345_MEDIUM_THRESHOLD);
+   bool highImpact = (adxl345Total > ADXL345_HIGH_THRESHOLD);
+   
+   bool rolloverSustained = mpuAvailable ? (rolloverCount >= ROLLOVER_STABILITY_COUNT) : false;
+   bool tiltWarning = mpuAvailable ? (abs(rollAngle) > MPU6050_TILT_THRESHOLD) : false;
+   bool rapidRotation = mpuAvailable ? (totalGyro > GYRO_ROTATION_THRESHOLD) : false;
+   
+   bool speedDrop = false;
+   if (gpsFixed && previousSpeed > 40.0 && currentSpeed < 10.0) {
+     float drop = previousSpeed - currentSpeed;
+     if (drop >= SPEED_DROP_THRESHOLD) {
+       speedDrop = true;
+     }
+   }
+ 
+   bool accidentCondition = false;
+ 
+   if (highImpact && vibrationGate) {
+     accidentType = "SEVERE_IMPACT";
+     impactLevel = "HIGH";
+     accidentCondition = true;
+   }
+   else if (mpuAvailable && rolloverSustained && vibrationGate) {
+     accidentType = "ROLLOVER";
+     impactLevel = "HIGH";
+     accidentCondition = true;
+   }
+   else if (speedDrop && vibrationGate && mediumImpact) {
+     accidentType = "SPEED_DROP_COLLISION";
+     impactLevel = "HIGH";
+     accidentCondition = true;
+   }
+   else if (mediumImpact && vibrationGate) {
+     accidentType = "IMPACT_COLLISION";
+     impactLevel = "MEDIUM";
+     accidentCondition = true;
+   }
+   else if (mpuAvailable && tiltWarning && rapidRotation && vibrationGate) {
+     accidentType = "VEHICLE_FLIP";
+     impactLevel = "MEDIUM";
+     accidentCondition = true;
+   }
+ 
+   if (accidentCondition) {
+     accidentDetected = true;
+     accidentTime = millis();
+     cancelPressed = false;
+     smsSent = false;
+ 
+     if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, LOW);
+ 
+     int beeps = (impactLevel == "HIGH") ? 5 : 3;
+     for (int i = 0; i < beeps; i++) {
+       digitalWrite(BUZZER_PIN, HIGH);
+       delay(100);
+       digitalWrite(BUZZER_PIN, LOW);
+       delay(100);
+     }
+ 
+     Serial.println("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+     Serial.println("      ! ACCIDENT DETECTED !");
+     Serial.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+     Serial.println("Type: " + accidentType);
+     Serial.println("Severity: " + impactLevel);
+     Serial.println("Impact: " + String(adxl345Total, 2) + "g");
+     Serial.println("Location: " + String(currentLat, 6) + ", " + String(currentLon, 6));
+     Serial.println("\nPress CANCEL within 10s!");
+     Serial.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+   }
+ }
+ 
+ void handleCancelButton() {
+   unsigned long elapsed = millis() - accidentTime;
+ 
+   if (digitalRead(OK_BUTTON_PIN) == LOW) {
+     delay(50);
+     if (digitalRead(OK_BUTTON_PIN) == LOW) {
+       cancelPressed = true;
+ 
+       Serial.println("\nALERT CANCELLED BY USER!\n");
+ 
+       accidentDetected = false;
+       smsSent = false;
+       adxl345MaxImpact = 0;
+       rolloverCount = 0;
+ 
+       digitalWrite(BUZZER_PIN, LOW);
+       if (DANGER_LED_PIN >= 0) digitalWrite(DANGER_LED_PIN, LOW);
+       if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, HIGH);
+       
+       while (digitalRead(OK_BUTTON_PIN) == LOW) delay(10);
+       return;
+     }
+   }
+   
+   if (elapsed >= CANCEL_WINDOW && !cancelPressed && !smsSent) {
+     Serial.println("TIME EXPIRED - Sending alerts!");
+     sendEmergencySMS();
+     if (gprsConnected) {
+       sendAccidentToAPI();
+     }
+   }
+ }
+ 
+ // ==================== COMMUNICATION - FIXED VERSION ====================
+ 
+ String buildTelemetryJSON() {
+   // Build JSON string manually (exact format that works)
+   String json = "{";
+   json += "\"deviceId\":\"" + DEVICE_ID + "\",";
+   
+   // GPS data
+   if (gpsFixed && currentLat != 0 && currentLon != 0) {
+     json += "\"latitude\":" + String(currentLat, 6) + ",";
+     json += "\"longitude\":" + String(currentLon, 6) + ",";
+   } else {
+     json += "\"latitude\":0,";
+     json += "\"longitude\":0,";
+   }
+   
+   json += "\"altitude\":" + String(altitude, 1) + ",";
+   json += "\"speed\":" + String(currentSpeed, 1) + ",";
+   json += "\"heading\":" + String(heading, 1) + ",";
+   
+   // Accelerometer (convert to g if needed)
+   json += "\"accelerationX\":" + String(adxl345X, 2) + ",";
+   json += "\"accelerationY\":" + String(adxl345Y, 2) + ",";
+   json += "\"accelerationZ\":" + String(adxl345Z, 2) + ",";
+   
+   // Gyroscope
+   json += "\"gyroX\":" + String(gyroX, 2) + ",";
+   json += "\"gyroY\":" + String(gyroY, 2) + ",";
+   json += "\"gyroZ\":" + String(gyroZ, 2) + ",";
+   
+   // Additional telemetry
+   json += "\"rpm\":0,";
+   json += "\"engineTemp\":0,";
+   json += "\"fuelLevel\":0,";
+   json += "\"batteryLevel\":" + String(batteryPercentFromVoltage(readBatteryVoltage())) + ",";
+   json += "\"signalStrength\":85,";
+   
+   // Raw data with accident info
+   json += "\"rawData\":{";
+   json += "\"totalAccel\":" + String(adxl345Total, 2) + ",";
+   json += "\"totalGyro\":" + String(totalGyro, 2) + ",";
+   json += "\"satellites\":" + String(satellites) + ",";
+   json += "\"accidentDetected\":" + String(accidentDetected ? "true" : "false");
+   if (mpuAvailable) {
+     json += ",\"rollAngle\":" + String(rollAngle, 1);
+     json += ",\"pitchAngle\":" + String(pitchAngle, 1);
+   }
+   json += "}";
+   
+   json += "}";
+   
+   return json;
+ }
+ 
+ bool httpPOST_Fixed(String jsonData) {
+   if (!gprsConnected) {
+     Serial.println("X GPRS not connected");
+     return false;
+   }
+ 
+   Serial.println("\n→ Sending to API...");
+   Serial.println("   Payload: " + String(jsonData.length()) + " bytes");
+   
+   // CRITICAL: Exact sequence from working code
+   
+   // 1. Terminate any existing session
+   sendATCommand("AT+HTTPTERM", 1000);
+   delay(1000);
+   
+   // 2. Enable SNI (CRITICAL for HTTPS!)
+   sendATCommand("AT+CSSLCFG=\"enableSNI\",0,1", 2000);
+   
+   // 3. Initialize HTTP
+   sendATCommand("AT+HTTPINIT", 2000);
+   
+   // 4. Set URL (HTTPS auto-detected!)
+   modemSerial.println("AT+HTTPPARA=\"URL\",\"" + String(API_URL) + "\"");
+   delay(1000);
+   readModemResponse(2000);
+   
+   // 5. Set Content-Type
+   modemSerial.println("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+   delay(1000);
+   readModemResponse(2000);
+   
+   // 6. Upload data
+   modemSerial.println("AT+HTTPDATA=" + String(jsonData.length()) + ",10000");
+   delay(1000);
+   
+   String downloadResp = readModemResponse(3000);
+   
+   bool success = false;
+   
+   if (downloadResp.indexOf("DOWNLOAD") >= 0) {
+     Serial.println("   → Uploading JSON...");
+     
+     // Send JSON (use print, not println!)
+     modemSerial.print(jsonData);
+     delay(2000);
+     
+     String dataResp = readModemResponse(3000);
+     
+     if (dataResp.indexOf("OK") >= 0) {
+       Serial.println("   → Data uploaded");
+       Serial.println("   → POSTing... (30s)");
+       
+       // Execute POST
+       modemSerial.println("AT+HTTPACTION=1");
+       
+       // Wait for response
+       for (int i = 0; i < 35; i++) {
+         delay(1000);
+         if (i % 5 == 0) Serial.print(".");
+         
+         if (modemSerial.available()) {
+           String result = readModemResponse(2000);
+           
+           if (result.indexOf("+HTTPACTION") >= 0) {
+             Serial.println("\n   Result: " + result);
+             
+             if (result.indexOf(",200,") >= 0 || result.indexOf(",201,") >= 0) {
+               Serial.println("   ✅ SUCCESS!");
+               
+               // Read response
+               modemSerial.println("AT+HTTPREAD=0,512");
+               delay(2000);
+               String content = readModemResponse(3000);
+               Serial.println("   Response: " + content);
+               
+               success = true;
+             } else {
+               Serial.println("   ❌ Failed: " + result);
+             }
+             break;
+           }
+         }
+       }
+       
+     } else {
+       Serial.println("   ❌ Upload failed");
+     }
+     
+   } else {
+     Serial.println("   ❌ No DOWNLOAD prompt");
+   }
+   
+   // Cleanup
+   sendATCommand("AT+HTTPTERM", 1000);
+   
+   return success;
+ }
+ 
+ void sendTrackingDataToAPI() {
+   Serial.println("\n📤 Sending telemetry...");
+   
+   String jsonData = buildTelemetryJSON();
+   
+   Serial.println("JSON: " + jsonData.substring(0, min(150, (int)jsonData.length())) + "...");
+   
+   if (httpPOST_Fixed(jsonData)) {
+     Serial.println("✅ Telemetry sent!\n");
+     
+     // UPDATE LAST TRANSMITTED VALUES
+     lastTransmitted.latitude = currentLat;
+     lastTransmitted.longitude = currentLon;
+     lastTransmitted.speed = currentSpeed;
+     lastTransmitted.heading = heading;
+     lastTransmitted.accelX = adxl345X;
+     lastTransmitted.accelY = adxl345Y;
+     lastTransmitted.accelZ = adxl345Z;
+     lastTransmitted.gyroX = gyroX;
+     lastTransmitted.gyroY = gyroY;
+     lastTransmitted.gyroZ = gyroZ;
+     lastTransmitted.batteryPercent = batteryPercentFromVoltage(readBatteryVoltage());
+     lastTransmitted.satellites = satellites;
+     lastTransmitted.hasData = true;
+     lastDataSent = millis();
+     
+   } else {
+     Serial.println("❌ Telemetry failed\n");
+   }
+ }
+ 
+ void sendAccidentToAPI() {
+   Serial.println("\n🚨 Sending accident data...");
+   
+   String jsonData = buildTelemetryJSON();
+   
+   if (httpPOST_Fixed(jsonData)) {
+     Serial.println("✅ Accident logged!\n");
+     
+     // Update last transmitted after accident too
+     lastTransmitted.latitude = currentLat;
+     lastTransmitted.longitude = currentLon;
+     lastTransmitted.speed = currentSpeed;
+     lastTransmitted.heading = heading;
+     lastTransmitted.accelX = adxl345X;
+     lastTransmitted.accelY = adxl345Y;
+     lastTransmitted.accelZ = adxl345Z;
+     lastTransmitted.gyroX = gyroX;
+     lastTransmitted.gyroY = gyroY;
+     lastTransmitted.gyroZ = gyroZ;
+     lastTransmitted.batteryPercent = batteryPercentFromVoltage(readBatteryVoltage());
+     lastTransmitted.satellites = satellites;
+     lastTransmitted.hasData = true;
+     lastDataSent = millis();
+     
+   } else {
+     Serial.println("❌ Accident logging failed\n");
+   }
+ }
+ 
+ void sendEmergencySMS() {
+   if (smsSent) return;
+ 
+   Serial.println("\n📱 SENDING EMERGENCY SMS");
+ 
+   if (!modemReady) {
+     Serial.println("X Modem not ready");
+     return;
+   }
+ 
+   sendATCommand("AT+CMGF=1", 1000);
+ 
+   String message = "!! VEHICLE ACCIDENT !!\n\n";
+   message += "Device: " + DEVICE_ID + "\n";
+   message += "Type: " + accidentType + "\n";
+   message += "Impact: " + String(adxl345MaxImpact, 2) + "g\n";
+   message += "Time: " + utcTime + "\n\n";
+ 
+   if (gpsFixed) {
+     message += "LOCATION:\n";
+     message += "Lat: " + String(currentLat, 6) + "\n";
+     message += "Lon: " + String(currentLon, 6) + "\n";
+     message += "Speed: " + String(currentSpeed, 1) + " km/h\n";
+     message += "http://maps.google.com/maps?q=" + String(currentLat, 6) + "," + String(currentLon, 6);
+   } else {
+     message += "GPS: No location\nCall immediately!";
+   }
+ 
+   modemSerial.print("AT+CMGS=\"");
+   modemSerial.print(EMERGENCY_CONTACT);
+   modemSerial.println("\"");
+   delay(500);
+ 
+   modemSerial.print(message);
+   delay(500);
+   modemSerial.write(26);
+ 
+   delay(5000);
+   String response = readModemResponse(10000);
+ 
+   if (response.indexOf("+CMGS:") >= 0 || response.indexOf("OK") >= 0) {
+     Serial.println("✅ SMS SENT!");
+     smsSent = true;
+   } else {
+     Serial.println("❌ SMS failed");
+   }
+ }
+ 
+ // ==================== STATUS LEDS ====================
+ 
+ void updateStatusLEDs() {
+   unsigned long currentMillis = millis();
+   
+   if (accidentDetected) {
+     if (!smsSent) {
+       if (currentMillis - lastDangerBlink >= 150) {
+         dangerLedState = !dangerLedState;
+         if (DANGER_LED_PIN >= 0) digitalWrite(DANGER_LED_PIN, dangerLedState);
+         lastDangerBlink = currentMillis;
+       }
+     } else {
+       if (DANGER_LED_PIN >= 0) digitalWrite(DANGER_LED_PIN, HIGH);
+     }
+     return;
+   } else {
+     if (DANGER_LED_PIN >= 0) digitalWrite(DANGER_LED_PIN, LOW);
+   }
+ 
+   if (GPS_LED_PIN >= 0) {
+     unsigned long gpsInterval = gpsFixed ? 250 : 1000;
+     if (currentMillis - lastGpsBlink >= gpsInterval) {
+       gpsLedState = !gpsLedState;
+       digitalWrite(GPS_LED_PIN, gpsLedState);
+       lastGpsBlink = currentMillis;
+     }
+   }
+ 
+   if (GSM_LED_PIN >= 0) {
+     unsigned long gsmInterval = modemReady ? 300 : 1500;
+     if (currentMillis - lastGsmBlink >= gsmInterval) {
+       gsmLedState = !gsmLedState;
+       digitalWrite(GSM_LED_PIN, gsmLedState);
+       lastGsmBlink = currentMillis;
+     }
+   }
+ 
+   if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, HIGH);
+ }
+ 
+ // ==================== AT HELPERS ====================
+ 
+ String sendATCommand(String cmd, unsigned long timeout) {
+   modemSerial.println(cmd);
+   return readModemResponse(timeout);
+ }
+ 
+ String readModemResponse(unsigned long timeout) {
+   String response = "";
+   unsigned long start = millis();
+ 
+   while (millis() - start < timeout) {
+     while (modemSerial.available()) {
+       char c = modemSerial.read();
+       response += c;
+     }
+ 
+     if (response.indexOf("OK\r\n") >= 0 || 
+         response.indexOf("ERROR\r\n") >= 0 ||
+         response.indexOf("DOWNLOAD") >= 0 ||
+         response.indexOf("+CMGS:") >= 0 ||
+         response.indexOf("+HTTPACTION:") >= 0) {
+       break;
+     }
+   }
+ 
+   response.trim();
+   return response;
+ }
+ 
+ // ==================== BATTERY ====================
+ 
+ float readBatteryVoltage() {
+   int rawValue = analogRead(BATTERY_ADC_PIN);
+   float adcVoltage = (rawValue / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
+   float batteryVoltage = adcVoltage * BATTERY_DIVIDER;
+   return batteryVoltage;
+ }
+ 
+ int batteryPercentFromVoltage(float voltage) {
+   if (voltage <= BATTERY_MIN_VOLTAGE) return 0;
+   if (voltage >= BATTERY_MAX_VOLTAGE) return 100;
+   
+   float percentage = ((voltage - BATTERY_MIN_VOLTAGE) / 
+                       (BATTERY_MAX_VOLTAGE - BATTERY_MIN_VOLTAGE)) * 100.0;
+   
+   return constrain((int)round(percentage), 0, 100);
+ }
