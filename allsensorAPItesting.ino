@@ -28,7 +28,7 @@
  #define GPS_MODULE_RX      17
  
  // Control & Indicators
- #define BUZZER_PIN         12
+ #define BUZZER_PIN         25
  #define OK_BUTTON_PIN      26
  #define MENU_BUTTON_PIN    27
  
