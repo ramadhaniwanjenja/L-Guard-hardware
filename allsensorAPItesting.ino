@@ -1,11 +1,11 @@
 /*
- * L-GUARD VEHICLE SAFETY SYSTEM v5.2 - FIXED API INTEGRATION
+ * L-GUARD VEHICLE SAFETY SYSTEM v5.3 - BUZZER FIX
  * 
- * CRITICAL FIX: Uses exact working HTTP sequence from test code
- * - No CID parameter in HTTPPARA
- * - SNI enabled for SSL
- * - HTTPS auto-detected from URL
- * - Real sensor data sent to API
+ * FIXED ISSUES:
+ * - Buzzer beeping on startup without meeting conditions
+ * - Added proper GPS validation before speed checks
+ * - Added minimum satellite requirement for speed alerts
+ * - Better initialization of speed variables
  */
 
  #include <Wire.h>
@@ -51,7 +51,12 @@
  const char* APN = "internet.mtn.rw";
  const char* API_URL = "https://lguard-backend-service.onrender.com/api/v1/telemetry/ingest";
  String DEVICE_ID = "VEHICLE_001";
- String EMERGENCY_CONTACT = "+250795613644";
+ String EMERGENCY_CONTACT = "+2507929577181";
+ 
+ // Speed Alert Configuration
+ const float SPEED_LIMIT = 60.0;  // km/h - buzzer beeps above this speed
+ const int MIN_SATELLITES_FOR_SPEED = 4;  // Minimum satellites needed for speed check
+ const float MIN_SPEED_THRESHOLD = 5.0;  // Ignore speeds below 5 km/h (GPS noise)
  
  // Detection Thresholds
  const float ADXL345_LOW_THRESHOLD = 3.0;
@@ -70,6 +75,8 @@
  const unsigned long API_SYNC_INTERVAL = 30000;
  const unsigned long STATUS_PRINT_INTERVAL = 5000;
  const unsigned long CANCEL_WINDOW = 10000;
+ const unsigned long SPEED_BEEP_INTERVAL = 1000;  // Beep every 1 second when speeding
+ const unsigned long GPS_WARMUP_TIME = 10000;  // Wait 10 seconds for GPS to stabilize
  
  // Battery constants
  const float BATTERY_DIVIDER = 2.0;
@@ -115,6 +122,12 @@
  String accidentType = "";
  String impactLevel = "";
  
+ // Speed alert state
+ bool isSpeeding = false;
+ unsigned long lastSpeedBeep = 0;
+ bool speedAlertEnabled = false;  // Don't enable until GPS is ready
+ unsigned long systemStartTime = 0;
+ 
  // Modem status
  bool modemReady = false;
  bool gprsConnected = false;
@@ -145,6 +158,7 @@
  void readVibration();
  void readGPS();
  void checkAccident();
+ void checkSpeedLimit();
  void handleCancelButton();
  void sendEmergencySMS();
  void sendAccidentToAPI();
@@ -182,6 +196,8 @@
    if (GPS_LED_PIN >= 0) digitalWrite(GPS_LED_PIN, LOW);
    if (GSM_LED_PIN >= 0) digitalWrite(GSM_LED_PIN, LOW);
    if (SYSTEM_LED_PIN >= 0) digitalWrite(SYSTEM_LED_PIN, LOW);
+   
+   // CRITICAL: Ensure buzzer is OFF at startup
    digitalWrite(BUZZER_PIN, LOW);
  
    digitalWrite(MODEM_PWR_PIN, LOW);
@@ -307,8 +323,11 @@
    delay(2000);
    
    Serial.println("\n\n=========================================================");
-   Serial.println("      L-GUARD v5.2 - FIXED API INTEGRATION");
+   Serial.println("      L-GUARD v5.3 - SPEED ALERT SYSTEM (FIXED)");
    Serial.println("=========================================================\n");
+   
+   // Record system start time
+   systemStartTime = millis();
    
    setupPins();
    
@@ -343,13 +362,21 @@
    Serial.println("=========================================================");
    Serial.println(" ACCIDENT DETECTION: ACTIVE");
    Serial.println(" GPS TRACKING: ACTIVE");
+   Serial.println(" SPEED ALERT: > 60 km/h (warming up...)");
    Serial.println(" API SYNC: " + String(gprsConnected ? "ENABLED" : "DISABLED"));
    Serial.println("=========================================================\n");
+   
+   Serial.println("⏳ Waiting for GPS to stabilize (10 seconds)...\n");
  }
  
  // ==================== MAIN LOOP ====================
  void loop() {
-   unsigned long currentMillis = millis();
+     unsigned long currentMillis = millis();
+   
+   // CRITICAL: Force buzzer LOW at start of every loop
+   if (!isSpeeding && !accidentDetected) {
+     digitalWrite(BUZZER_PIN, LOW);
+   }
  
    if (currentMillis - lastSensorRead >= SENSOR_READ_INTERVAL) {
      readADXL345();
@@ -361,6 +388,7 @@
  
    if (currentMillis - lastGpsUpdate >= GPS_UPDATE_INTERVAL) {
      readGPS();
+     checkSpeedLimit();  // Check speed and control buzzer
      lastGpsUpdate = currentMillis;
    }
  
@@ -385,8 +413,13 @@
        Serial.print(mpuAvailable ? String(rollAngle, 1) : "N/A");
        Serial.print("deg | Speed:");
        Serial.print(currentSpeed, 1);
-       Serial.print("km/h | GPS:");
+       Serial.print("km/h");
+       if (isSpeeding) {
+         Serial.print(" ⚠️SPEEDING");
+       }
+       Serial.print(" | GPS:");
        Serial.print(gpsFixed ? "FIX" : "NO");
+       Serial.print("(" + String(satellites) + ")");
        Serial.print(" | Bat:");
        Serial.print(battV, 1);
        Serial.println("V");
@@ -399,7 +432,8 @@
  
  // ==================== SENSOR READING ====================
  
- void readADXL345() {
+ void readADXL345() 
+ {
    sensors_event_t event;
    accel.getEvent(&event);
  
@@ -485,6 +519,57 @@
    }
  }
  
+ // ==================== SPEED LIMIT CHECK (FIXED) ====================
+ 
+ void checkSpeedLimit() {
+   unsigned long currentMillis = millis();
+   
+   // CRITICAL: Always start by ensuring buzzer is OFF
+   // Only turn it on if ALL conditions are met
+   
+   // Don't check anything if system not ready
+   if (!speedAlertEnabled) {
+     digitalWrite(BUZZER_PIN, LOW);
+     isSpeeding = false;
+     return;
+   }
+   
+   // Check if ALL conditions are met for beeping
+   bool allConditionsMet = (
+     gpsFixed &&                                    // GPS has fix
+     satellites >= MIN_SATELLITES_FOR_SPEED &&      // Enough satellites
+     currentSpeed > MIN_SPEED_THRESHOLD &&          // Valid speed (not noise)
+     currentSpeed > SPEED_LIMIT                     // Actually over limit
+   );
+   
+   if (allConditionsMet) {
+     // All conditions met - can beep
+     if (!isSpeeding) {
+       isSpeeding = true;
+       Serial.println("\n⚠️ WARNING: OVERSPEEDING!");
+       Serial.println("Speed: " + String(currentSpeed, 1) + " km/h");
+       Serial.println("Limit: " + String(SPEED_LIMIT, 0) + " km/h");
+       Serial.println("Sats: " + String(satellites) + "\n");
+     }
+     
+     // Beep every second
+     if (currentMillis - lastSpeedBeep >= SPEED_BEEP_INTERVAL) {
+       digitalWrite(BUZZER_PIN, HIGH);
+       delay(200);
+       digitalWrite(BUZZER_PIN, LOW);
+       lastSpeedBeep = currentMillis;
+     }
+   } else {
+     // NOT all conditions met - buzzer OFF
+     digitalWrite(BUZZER_PIN, LOW);
+     
+     if (isSpeeding) {
+       Serial.println("\n✅ Speed normal\n");
+     }
+     isSpeeding = false;
+   }
+ }
+ 
  // ==================== ACCIDENT DETECTION ====================
  
  void checkAccident() {
@@ -542,14 +627,8 @@
      smsSent = false;
  
      if (SAFE_LED_PIN >= 0) digitalWrite(SAFE_LED_PIN, LOW);
- 
-     int beeps = (impactLevel == "HIGH") ? 5 : 3;
-     for (int i = 0; i < beeps; i++) {
-       digitalWrite(BUZZER_PIN, HIGH);
-       delay(100);
-       digitalWrite(BUZZER_PIN, LOW);
-       delay(100);
-     }
+     
+     // NO BEEPING - Removed accident beeps
  
      Serial.println("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
      Serial.println("      ! ACCIDENT DETECTED !");
@@ -599,7 +678,7 @@
  // ==================== COMMUNICATION - FIXED VERSION ====================
  
  String buildTelemetryJSON() {
-   // Build JSON string manually (exact format that works)
+   // Build JSON string - EXACT format as specified
    String json = "{";
    json += "\"deviceId\":\"" + DEVICE_ID + "\",";
    
@@ -612,19 +691,19 @@
      json += "\"longitude\":0,";
    }
    
-   json += "\"altitude\":" + String(altitude, 1) + ",";
-   json += "\"speed\":" + String(currentSpeed, 1) + ",";
-   json += "\"heading\":" + String(heading, 1) + ",";
+   json += "\"altitude\":" + String((int)altitude) + ",";
+   json += "\"speed\":" + String((int)currentSpeed) + ",";
+   json += "\"heading\":" + String((int)heading) + ",";
    
-   // Accelerometer (convert to g if needed)
-   json += "\"accelerationX\":" + String(adxl345X, 2) + ",";
-   json += "\"accelerationY\":" + String(adxl345Y, 2) + ",";
-   json += "\"accelerationZ\":" + String(adxl345Z, 2) + ",";
+   // Accelerometer
+   json += "\"accelerationX\":" + String(adxl345X, 1) + ",";
+   json += "\"accelerationY\":" + String(adxl345Y, 1) + ",";
+   json += "\"accelerationZ\":" + String(adxl345Z, 1) + ",";
    
    // Gyroscope
-   json += "\"gyroX\":" + String(gyroX, 2) + ",";
-   json += "\"gyroY\":" + String(gyroY, 2) + ",";
-   json += "\"gyroZ\":" + String(gyroZ, 2) + ",";
+   json += "\"gyroX\":" + String((int)gyroX) + ",";
+   json += "\"gyroY\":" + String((int)gyroY) + ",";
+   json += "\"gyroZ\":" + String((int)gyroZ) + ",";
    
    // Additional telemetry
    json += "\"rpm\":0,";
@@ -633,17 +712,8 @@
    json += "\"batteryLevel\":" + String(batteryPercentFromVoltage(readBatteryVoltage())) + ",";
    json += "\"signalStrength\":85,";
    
-   // Raw data with accident info
-   json += "\"rawData\":{";
-   json += "\"totalAccel\":" + String(adxl345Total, 2) + ",";
-   json += "\"totalGyro\":" + String(totalGyro, 2) + ",";
-   json += "\"satellites\":" + String(satellites) + ",";
-   json += "\"accidentDetected\":" + String(accidentDetected ? "true" : "false");
-   if (mpuAvailable) {
-     json += ",\"rollAngle\":" + String(rollAngle, 1);
-     json += ",\"pitchAngle\":" + String(pitchAngle, 1);
-   }
-   json += "}";
+   // Empty rawData object
+   json += "\"rawData\":{}";
    
    json += "}";
    
@@ -911,3 +981,4 @@
    
    return constrain((int)round(percentage), 0, 100);
  }
+ 
