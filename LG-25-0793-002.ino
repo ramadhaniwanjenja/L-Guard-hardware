@@ -49,7 +49,7 @@
  #define BATTERY_ADC_PIN    34
  
  // LED pins
- #define SAFE_LED_PIN       25
+ #define SAFE_LED_PIN       12
  #define DANGER_LED_PIN     14
  #define GPS_LED_PIN        13
  #define GSM_LED_PIN        23

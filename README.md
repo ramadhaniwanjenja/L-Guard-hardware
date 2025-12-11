@@ -150,7 +150,7 @@ GND          →    Button (other)     Common ground
 ```
 ESP32 Pin    →    LED Color          Status Indication
 -------------------------------------------------
-GPIO 25      →    Green LED          System SAFE (shared with buzzer)
+GPIO 12      →    Green LED          System SAFE
 GPIO 14      →    Red LED            DANGER/Accident detected
 GPIO 13      →    Blue LED           GPS status
 GPIO 23      →    Yellow LED         GSM/Modem status
