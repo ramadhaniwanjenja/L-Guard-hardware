@@ -33,7 +33,7 @@ HardwareSerial gpsSerial(1);
 HardwareSerial gsmSerial(2);
 
 // Pin definitions
-const int piezoPin = 34;
+const int x`
 const int safeLED = 2;
 const int dangerLED = 4;
 const int gpsLED = 5;
