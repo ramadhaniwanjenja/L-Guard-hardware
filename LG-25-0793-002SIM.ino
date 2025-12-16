@@ -232,7 +232,7 @@
    // CRITICAL: Ensure buzzer is OFF at startup
    digitalWrite(BUZZER_PIN, LOW);
  
-   digitalWrite(MODEM_PWR_PIN, LOW);
+   digitalWrite(MODEM_PWR_PIN, HIGH);
    digitalWrite(MODEM_DTR_PIN, LOW);
    digitalWrite(MODEM_RESET_PIN, HIGH);
  }
@@ -287,9 +287,9 @@
    delay(2000);
    
    Serial.println("  . Powering on...");
-   digitalWrite(MODEM_PWR_PIN, HIGH);
-   delay(1000);
    digitalWrite(MODEM_PWR_PIN, LOW);
+   delay(1000);
+   digitalWrite(MODEM_PWR_PIN, HIGH);
    delay(3000);
    
    sendATCommand("AT", 500);

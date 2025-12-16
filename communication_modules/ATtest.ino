@@ -10,6 +10,7 @@ AT+CSQ                → Check signal strength
 AT+CGMI               → Get manufacturer info
 AT+CGMM               → Get model
 ATI                   → Get modem info
+send sms
  */
 
  #define MODEM_RXD           5
@@ -61,4 +62,14 @@ ATI                   → Get modem info
      String response = modemSerial.readString();
      Serial.print(response);
    }
+   //send sms
+   modemSerial.println("AT+CMGF=1");
+   delay(1000);
+   modemSerial.println("AT+CMGS=\"+2507929577181\"");
+   delay(1000);
+   modemSerial.println("Hello, this is a test SMS");
+   delay(1000);
+   modemSerial.println((char)26);
+   delay(1000);
+   Serial.println("SMS sent");
  }
