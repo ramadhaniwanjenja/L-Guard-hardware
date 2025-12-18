@@ -51,7 +51,7 @@
  const char* APN = "internet.mtn.rw";
  const char* API_URL = "https://lguard-backend-service.onrender.com/api/v1/telemetry/ingest";
  String DEVICE_ID = "VEHICLE_001";
- String EMERGENCY_CONTACT = "+2507929577181";
+ String EMERGENCY_CONTACT = "+250792957781";
  
  // Speed Alert Configuration
  const float SPEED_LIMIT = 60.0;  // km/h - buzzer beeps above this speed

@@ -43,7 +43,7 @@ const int wifiLED = 27;
 const int configButton = 0; // Boot button for reset
 
 // Emergency contact 
-String phoneNumber = "+250795613644";
+String phoneNumber = "+250792957781";
 
 // GPS variables
 float currentLat = 0, currentLon = 0, altitude = 0;

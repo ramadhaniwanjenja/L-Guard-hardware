@@ -65,7 +65,7 @@ send sms
    //send sms
    modemSerial.println("AT+CMGF=1");
    delay(1000);
-   modemSerial.println("AT+CMGS=\"+2507929577181\"");
+   modemSerial.println("AT+CMGS=\"+250792957781\"");
    delay(1000);
    modemSerial.println("Hello, this is a test SMS");
    delay(1000);
