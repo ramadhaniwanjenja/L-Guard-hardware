@@ -46,6 +46,16 @@ send sms
    Serial.println("OK Ready!");
    Serial.println("\nType AT commands (e.g., AT, AT+CPIN?, AT+CREG?)");
    Serial.println("================================================\n");
+    //send sms
+    modemSerial.println("AT+CMGF=1");
+    delay(1000);
+    modemSerial.println("AT+CMGS=\"+250792957781\"");
+    delay(1000);
+    modemSerial.println("Hello, this is a test SMS");
+    delay(1000);
+    modemSerial.println((char)26);
+    delay(1000);
+    Serial.println("SMS sent");
  }
  
  void loop() {
@@ -62,14 +72,5 @@ send sms
      String response = modemSerial.readString();
      Serial.print(response);
    }
-   //send sms
-   modemSerial.println("AT+CMGF=1");
-   delay(1000);
-   modemSerial.println("AT+CMGS=\"+250792957781\"");
-   delay(1000);
-   modemSerial.println("Hello, this is a test SMS");
-   delay(1000);
-   modemSerial.println((char)26);
-   delay(1000);
-   Serial.println("SMS sent");
+  
  }
