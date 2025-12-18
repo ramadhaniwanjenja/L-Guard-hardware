@@ -233,8 +233,8 @@
    digitalWrite(BUZZER_PIN, LOW);
  
    digitalWrite(MODEM_PWR_PIN, HIGH);
-   digitalWrite(MODEM_DTR_PIN, LOW);
-   digitalWrite(MODEM_RESET_PIN, HIGH);
+   digitalWrite(MODEM_DTR_PIN, HIGH);
+   digitalWrite(MODEM_RESET_PIN, LOW);
  }
  
  void setupSensors() {
@@ -288,9 +288,12 @@
    
    Serial.println("  . Powering on...");
    digitalWrite(MODEM_PWR_PIN, LOW);
-   delay(1000);
+   delay(100);
    digitalWrite(MODEM_PWR_PIN, HIGH);
+   delay(1500);
+   digitalWrite(MODEM_PWR_PIN, LOW);
    delay(3000);
+
    
    sendATCommand("AT", 500);
    sendATCommand("ATE0", 500);
