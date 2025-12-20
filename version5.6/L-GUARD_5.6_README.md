@@ -3,7 +3,7 @@
 
 ---
 
-**QUICK SUMMARY - What's New in v5.6:**
+##**QUICK SUMMARY - What's New in v5.6:**
 -✅ MPU6050 auto-calibration (perfect zero reference)
 -✅ Enhanced movement detection (catches idle vibrations)  
 -✅ Battery smoothing (5-sample average, eliminates noise)
