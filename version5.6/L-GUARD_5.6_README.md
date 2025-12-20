@@ -1,15 +1,15 @@
 # 🚗 L-GUARD v5.6 - Vehicle Safety System
-## Complete Installation & Operation Guide - COPY & PASTE READY
+## Complete Installation & Operation Guide 
 
 ---
 
 **QUICK SUMMARY - What's New in v5.6:**
-✅ MPU6050 auto-calibration (perfect zero reference)
-✅ Enhanced movement detection (catches idle vibrations)  
-✅ Battery smoothing (5-sample average, eliminates noise)
-✅ Extended heartbeat (15min instead of 5min - 67% reduction)
-✅ Startup anti-spam (no immediate sync on power-on)
-✅ Battery-only change filter (ignores noise-triggered syncs)
+-✅ MPU6050 auto-calibration (perfect zero reference)
+-✅ Enhanced movement detection (catches idle vibrations)  
+-✅ Battery smoothing (5-sample average, eliminates noise)
+-✅ Extended heartbeat (15min instead of 5min - 67% reduction)
+-✅ Startup anti-spam (no immediate sync on power-on)
+-✅ Battery-only change filter (ignores noise-triggered syncs)
 
 ---
 
@@ -620,16 +620,16 @@ const float ACCEL_CHANGE_THRESHOLD = 2.0;  // g
 ⚠️ **THIS IS A MONITORING DEVICE, NOT A SAFETY DEVICE**
 
 L-GUARD is designed to:
-✅ Monitor conditions
-✅ Detect potential accidents
-✅ Alert emergency contacts
-✅ Track location
+-✅ Monitor conditions
+-✅ Detect potential accidents
+-✅ Alert emergency contacts
+-✅ Track location
 
-L-GUARD is NOT:
-❌ A replacement for safe driving
-❌ A substitute for vehicle safety systems
-❌ Guaranteed to detect all accidents
-❌ Certified for critical safety applications
+**L-GUARD is NOT:**
+-❌ A replacement for safe driving
+-❌ A substitute for vehicle safety systems
+-❌ Guaranteed to detect all accidents
+-❌ Certified for critical safety applications
 
 **Always drive safely! This system is a tool, not a guarantee.**
 
@@ -671,11 +671,11 @@ L-GUARD is NOT:
 ## 🎉 YOU'RE READY!
 
 **What Makes v5.6 Special:**
-✨ Auto-calibrating sensors (no manual setup!)
-✨ Enhanced movement detection (never misses activity!)
-✨ Clean API syncs (67% less spam!)
-✨ Smooth battery readings (no noise!)
-✨ Intelligent sleep (only when truly idle!)
+-✨ Auto-calibrating sensors (no manual setup!)
+-✨ Enhanced movement detection (never misses activity!)
+-✨ Clean API syncs (67% less spam!)
+-✨ Smooth battery readings (no noise!)
+-✨ Intelligent sleep (only when truly idle!)
 
 **Final Reminders:**
 1. Place vehicle on level surface during startup
