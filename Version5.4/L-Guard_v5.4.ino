@@ -4,7 +4,7 @@
  * - Fixed SMS sending with proper AT commands
  * - Added Google Maps link in SMS
  * - Cleaned up serial output (single line status)
- * - Improved modem response handling
+ * - Improved modem response handlingg
  */
 
  #include <Wire.h>
