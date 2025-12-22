@@ -1,5 +1,6 @@
 #define VIBRATION_SENSOR_PIN 32 
 void setup() {
+  Serial.begin(115200);
   pinMode(VIBRATION_SENSOR_PIN, INPUT);
 }
 
