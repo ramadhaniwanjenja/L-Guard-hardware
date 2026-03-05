@@ -201,7 +201,7 @@
     if (SYSTEM_LED_PIN >= 0) digitalWrite(SYSTEM_LED_PIN, LOW);
     digitalWrite(BUZZER_PIN, LOW);
     digitalWrite(MODEM_PWR_PIN, HIGH);
-    digitalWrite(MODEM_DTR_PIN, LOW); // the only code line to be changed
+    digitalWrite(MODEM_DTR_PIN, HIGH);
     digitalWrite(MODEM_RESET_PIN, LOW);
   }
 
