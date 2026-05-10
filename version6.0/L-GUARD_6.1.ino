@@ -9,15 +9,15 @@
  * ║       Tilt:     FLAT→WARN(45°)→ROLLOVER(70°)                 ║
  * ║       Speed:    STOPPED→CRAWL→NORMAL→FAST→OVERSPEED          ║
  * ║       Gyro:     STILL→MOVING→SPINNING                        ║
- * ║  ✅ syncReason tag injected into every telemetry JSON packet  ║
  * ║  ✅ Peak tracking: g, gyro, roll, pitch, speed               ║
- * ║  ✅ Peaks printed live in Serial Monitor compact status       ║
- * ║  ✅ Peaks included in telemetry + accident JSON payloads      ║
+ * ║  ✅ Peaks printed live in Serial Monitor (compact status)     ║
+ * ║  ✅ Peaks in accident Serial dump (live vs peak side-by-side) ║
+ * ║  ✅ JSON payloads kept IDENTICAL to v6.0 (no schema breaks)  ║
  * ║  ✅ Rollover fix: needs sustained tilt AND min impact         ║
  * ║       → prevents false alarm while parked on a slope         ║
  * ║  ✅ 60-second gentle peak decay (50% every cycle)            ║
  * ║  ✅ Accident Serial print shows both live and peak values     ║
- * ║  ✅ buildAccidentJSON includes accidentType, peakImpactG etc  ║
+ * ║  ✅ Band transitions print in Serial with exact reason label  ║
  * ╚══════════════════════════════════════════════════════════════╝
  *
  *  WIRING (unchanged from v6.0):
@@ -994,6 +994,9 @@ bool hasSignificantChange() {
 
 // ══════════════════════════════════════════════════════════════
 //  JSON BUILDERS
+//  IMPORTANT: Keep field names identical to v6.0 — the backend
+//  schema validates exact field names. All extra v6.1 data
+//  (peaks, bands, syncReason) stays in Serial Monitor only.
 // ══════════════════════════════════════════════════════════════
 String buildTelemetryJSON() {
   String json = "{";
@@ -1003,57 +1006,48 @@ String buildTelemetryJSON() {
     json += "\"latitude\":"  + String(currentLat, 6) + ",";
     json += "\"longitude\":" + String(currentLon, 6) + ",";
   } else {
-    json += "\"latitude\":0,\"longitude\":0,";
+    json += "\"latitude\":0,";
+    json += "\"longitude\":0,";
   }
 
-  json += "\"altitude\":"    + String((int)altitude)    + ",";
-  json += "\"speed\":"       + String(currentSpeed, 1)  + ",";
-  json += "\"heading\":"     + String((int)heading)     + ",";
-  json += "\"accelerationX\":" + String(adxl375X, 2)   + ",";
-  json += "\"accelerationY\":" + String(adxl375Y, 2)   + ",";
-  json += "\"accelerationZ\":" + String(adxl375Z, 2)   + ",";
-  json += "\"gyroX\":"       + String(gyroX, 2)         + ",";
-  json += "\"gyroY\":"       + String(gyroY, 2)         + ",";
-  json += "\"gyroZ\":"       + String(gyroZ, 2)         + ",";
-  json += "\"rpm\":0,\"engineTemp\":0,\"fuelLevel\":0,";
-  json += "\"batteryLevel\":" + String(batteryPercentFromVoltage(readBatteryVoltage())) + ",";
+  json += "\"altitude\":"       + String((int)altitude)       + ",";
+  json += "\"speed\":"          + String(currentSpeed, 1)     + ",";
+  json += "\"heading\":"        + String((int)heading)        + ",";
+  json += "\"accelerationX\":"  + String(adxl375X, 2)         + ",";
+  json += "\"accelerationY\":"  + String(adxl375Y, 2)         + ",";
+  json += "\"accelerationZ\":"  + String(adxl375Z, 2)         + ",";
+  json += "\"gyroX\":"          + String(gyroX, 2)            + ",";
+  json += "\"gyroY\":"          + String(gyroY, 2)            + ",";
+  json += "\"gyroZ\":"          + String(gyroZ, 2)            + ",";
+  json += "\"rpm\":0,";
+  json += "\"engineTemp\":0,";
+  json += "\"fuelLevel\":0,";
+  json += "\"batteryLevel\":"   + String(batteryPercentFromVoltage(readBatteryVoltage())) + ",";
   json += "\"signalStrength\":85,";
 
-  // ── syncReason: tells backend exactly why this packet was sent ──
-  json += "\"syncReason\":\"" + (syncReason.length() > 0 ? syncReason : "PERIODIC") + "\",";
-
   json += "\"rawData\":{";
-  json += "\"totalAccel\":"    + String(adxl375Total, 2)  + ",";
-  json += "\"totalGyro\":"     + String(totalGyro, 2)     + ",";
-  json += "\"pitchAngle\":"    + String(pitchAngle, 1)    + ",";
-  json += "\"rollAngle\":"     + String(rollAngle, 1)     + ",";
-  // ── Peak values (v6.1) ──────────────────────────────────────
-  json += "\"peakImpactG\":"   + String(peakImpactG, 2)   + ",";
-  json += "\"peakGyroRad\":"   + String(peakGyroRad, 2)   + ",";
-  json += "\"peakRollDeg\":"   + String(peakRollDeg, 1)   + ",";
-  json += "\"peakPitchDeg\":"  + String(peakPitchDeg, 1)  + ",";
-  json += "\"peakSpeedKmh\":"  + String(peakSpeedKmh, 1)  + ",";
-  // ── Band labels ─────────────────────────────────────────────
-  json += "\"impactBand\":\""  + impactBandName(currentImpactBand) + "\",";
-  json += "\"tiltBand\":\""    + tiltBandName(currentTiltBand)     + "\",";
-  json += "\"speedBand\":\""   + speedBandName(currentSpeedBand)   + "\",";
-  json += "\"gyroBand\":\""    + gyroBandName(currentGyroBand)     + "\",";
+  json += "\"totalAccel\":"     + String(adxl375Total, 2) + ",";
+  json += "\"totalGyro\":"      + String(totalGyro, 2)    + ",";
+  json += "\"pitchAngle\":"     + String(pitchAngle, 1)   + ",";
+  json += "\"rollAngle\":"      + String(rollAngle, 1)    + ",";
   json += "\"vibration\":false,";
-  json += "\"satellites\":"    + String(satellites)    + ",";
-  json += "\"hdop\":"          + String(hdop, 1)       + ",";
-  json += "\"fixQuality\":\""  + fixQuality            + "\",";
+  json += "\"satellites\":"     + String(satellites)      + ",";
+  json += "\"hdop\":"           + String(hdop, 1)         + ",";
+  json += "\"fixQuality\":\""   + fixQuality              + "\",";
   json += "\"accidentDetected\":" + String(accidentDetected ? "true" : "false");
   if (accidentDetected || smsSent) {
     json += ",\"accidentType\":\"" + accidentType + "\",";
     json += "\"impactLevel\":\""   + impactLevel  + "\",";
     json += "\"maxImpact\":"       + String(adxl375MaxImpact, 1);
   }
-  json += "}}";
+  json += "}";   // close rawData
+
+  json += "}";   // close root
   return json;
 }
 
 String buildAccidentJSON() {
-  // Map internal level to API severity enum
+  // Map internal level to API severity enum (same mapping as v6.0)
   String severity;
   if      (impactLevel == "EXTREME") severity = "SEVERE";
   else if (impactLevel == "HIGH")    severity = "SEVERE";
@@ -1061,21 +1055,18 @@ String buildAccidentJSON() {
   else                               severity = "MINOR";
 
   String json = "{";
-  json += "\"deviceId\":\""     + DEVICE_ID     + "\",";
-  json += "\"severity\":\""     + severity      + "\",";
-  json += "\"accidentType\":\"" + accidentType  + "\",";
-  json += "\"speed\":"          + String(currentSpeed, 1)      + ",";
-  json += "\"impactG\":"        + String(adxl375MaxImpact, 2)  + ",";
-  json += "\"peakImpactG\":"    + String(peakImpactG, 2)       + ",";
-  json += "\"rollAngle\":"      + String(rollAngle, 1)         + ",";
-  json += "\"pitchAngle\":"     + String(pitchAngle, 1)        + ",";
-  json += "\"peakGyroRad\":"    + String(peakGyroRad, 2)       + ",";
+  json += "\"deviceId\":\"" + DEVICE_ID + "\",";
+  json += "\"severity\":\""  + severity       + "\",";
+  json += "\"speed\":"       + String(currentSpeed, 1) + ",";
+
   if (gpsFixed && currentLat != 0 && currentLon != 0) {
     json += "\"latitude\":"  + String(currentLat, 6) + ",";
     json += "\"longitude\":" + String(currentLon, 6);
   } else {
-    json += "\"latitude\":0.0,\"longitude\":0.0";
+    json += "\"latitude\":0.0,";
+    json += "\"longitude\":0.0";
   }
+
   json += "}";
   return json;
 }
@@ -1322,27 +1313,40 @@ int batteryPercentFromVoltage(float v) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  COMPACT STATUS PRINT  (v6.1: peaks + band labels)
+//  COMPACT STATUS PRINT — single line (same style as v6.0)
+//  Added: peak impact column requested in v6.1
 // ══════════════════════════════════════════════════════════════
 void printCompactStatus() {
-  Serial.println("┌─────────────────────────────────────────────────────────────┐");
-  Serial.printf( "│ IMPACT  live:%-6.2fg  PEAK:%-6.2fg  Band: %-14s     │\n",
-                 adxl375Total, peakImpactG, impactBandName(currentImpactBand).c_str());
-  Serial.printf( "│ GYRO    live:%-5.2f   PEAK:%-5.2f   Band: %-14s     │\n",
-                 totalGyro, peakGyroRad, gyroBandName(currentGyroBand).c_str());
-  Serial.printf( "│ TILT    R:%-5.1f°(pk%-5.1f°)  P:%-5.1f°(pk%-5.1f°)  Band:%-14s│\n",
-                 rollAngle, peakRollDeg, pitchAngle, peakPitchDeg,
-                 tiltBandName(currentTiltBand).c_str());
-  Serial.printf( "│ SPEED   live:%-5.1f  PEAK:%-5.1f  Band:%-14s  %s  │\n",
-                 currentSpeed, peakSpeedKmh, speedBandName(currentSpeedBand).c_str(),
-                 isSpeeding ? "⚠️ OVERSPEED" : "            ");
-  Serial.printf( "│ GPS:%s(%dsat HDOP:%.1f)  Bat:%d%%  GSM:%s  API:%s  Last:%lus │\n",
-                 gpsFixed ? "FIX" : "NO ", satellites, hdop,
-                 batteryPercentFromVoltage(readBatteryVoltage()),
-                 modemReady    ? "OK" : "NO",
-                 gprsConnected ? "OK" : "NO",
-                 (millis() - lastApiSent) / 1000UL);
-  Serial.println("└─────────────────────────────────────────────────────────────┘");
+  Serial.print("│ Impact:");
+  Serial.print(adxl375Total, 1);
+  Serial.print("g(pk:");
+  Serial.print(peakImpactG, 1);
+  Serial.print("g)");
+  Serial.print(" │ Tilt:");
+  Serial.print(mpuAvailable ? String(rollAngle, 0) : "NA");
+  Serial.print("°");
+  Serial.print(" │ Gyro:");
+  Serial.print(mpuAvailable ? String(totalGyro, 1) : "NA");
+  Serial.print(" │ Spd:");
+  Serial.print(currentSpeed, 1);
+  Serial.print("km/h");
+  if (isSpeeding) Serial.print("⚠️");
+  Serial.print(" │ GPS:");
+  Serial.print(gpsFixed ? "OK" : "NO");
+  Serial.print("(");
+  Serial.print(satellites);
+  Serial.print(")");
+  Serial.print(" │ HDOP:");
+  Serial.print(hdop, 1);
+  Serial.print(" │ Bat:");
+  Serial.print(batteryPercentFromVoltage(readBatteryVoltage()));
+  Serial.print("% │ GSM:");
+  Serial.print(modemReady ? "OK" : "NO");
+  Serial.print(" │ API:");
+  Serial.print(gprsConnected ? "OK" : "NO");
+  Serial.print(" │ Last:");
+  Serial.print((millis() - lastApiSent) / 1000);
+  Serial.println("s │");
 }
 
 // ══════════════════════════════════════════════════════════════
