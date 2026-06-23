@@ -1,11 +1,19 @@
 /*
- * ADXL375 STANDALONE TEST + REAL-TIME CELLULAR UPLOAD
- * L-Guard High-G Peak Capture — sends every 500ms via SIM A7670E
+ * ╔══════════════════════════════════════════════════════════════╗
+ * ║   L-GUARD ADXL375 WIRELESS TEST  v3.0                       ║
+ * ╠══════════════════════════════════════════════════════════════╣
+ * ║   ✅ 800 Hz free-running — catches spikes                    ║
+ * ║   ✅ Impact ALWAYS interrupts heartbeat retry                 ║
+ * ║   ✅ Impact takes priority over heartbeat                     ║
+ * ║   ✅ Heartbeat every 10s when no impact                       ║
+ * ║   ✅ Peak resets to live after successful upload              ║
+ * ║   ✅ Watchdog resets modem after 20 consecutive failures      ║
+ * ╚══════════════════════════════════════════════════════════════╝
  *
- * Wiring ESP32:
- *   ADXL375  VCC→3.3V  GND→GND  SDA→GPIO21  SCL→GPIO22
- *            CS→3.3V  SDO→GND  (addr 0x53)
- *   SIM A7670E  RXD→GPIO5  TXD→GPIO4  PWR→GPIO15  DTR→GPIO18  RESET→GPIO19
+ *  Wiring:
+ *  ADXL375  VCC→3.3V GND→GND SDA→GPIO21 SCL→GPIO22
+ *           CS→3.3V (I2C mode)  SDO→GND  (addr 0x53)
+ *  SIM A7670E  RXD→4 TXD→5 PWR→15 DTR→18 RESET→19
  */
 
 #include <Wire.h>
@@ -13,14 +21,14 @@
 #include <Adafruit_ADXL375.h>
 
 // ── MODEM PINS ─────────────────────────────────────────────────
-#define MODEM_RXD       5
-#define MODEM_TXD       4
-#define MODEM_PWR_PIN  15
-#define MODEM_DTR_PIN  18
-#define MODEM_RESET_PIN 19
+#define MODEM_RXD            5
+#define MODEM_TXD            4
+#define MODEM_PWR_PIN       15
+#define MODEM_DTR_PIN       18
+#define MODEM_RESET_PIN     19
 
 // ── SENSOR ────────────────────────────────────────────────────
-#define ADXL375_ADDRESS 0x53
+#define ADXL375_ADDRESS    0x53
 
 // ── NETWORK / DEVICE ───────────────────────────────────────────
 const char* APN       = "internet.mtn.rw";
@@ -28,61 +36,57 @@ const char* API_URL   = "https://lguard-backend-service.onrender.com/api/v1/tele
 String      DEVICE_ID = "LG-25-0793-002";
 
 // ── THRESHOLDS ────────────────────────────────────────────────
-const float THRESH_LOW     =   8.0;
-const float THRESH_MEDIUM  =  25.0;
-const float THRESH_HIGH    =  50.0;
-const float THRESH_EXTREME = 100.0;
+const float ADXL375_LOW_THRESHOLD     =   8.0;
+const float ADXL375_MEDIUM_THRESHOLD  =  25.0;
+const float ADXL375_HIGH_THRESHOLD    =  50.0;
+const float ADXL375_EXTREME_THRESHOLD = 100.0;
 
 // ── TIMING ────────────────────────────────────────────────────
-const unsigned long PRINT_AND_UPLOAD_INTERVAL = 500UL;
-const float         MPS2_TO_G                 = 1.0 / 9.80665;
-const int           WATCHDOG_THRESHOLD        = 20;
+const unsigned long HEARTBEAT_INTERVAL      = 10000UL;
+const unsigned long MIN_GAP_BETWEEN_UPLOADS =  2000UL;
+const unsigned long STATUS_PRINT            =  1000UL;
+const unsigned long PEAK_DECAY_INTERVAL     = 60000UL;
+const int           UPLOAD_RETRIES          = 2;
+const int           WATCHDOG_THRESHOLD      = 20;
+const float         MPS2_TO_G              = 1.0 / 9.80665;
 
-// ── SENSOR STATE ──────────────────────────────────────────────
+// ── PRIORITY SYNC FLAG ────────────────────────────────────────
+bool   thresholdCrossed = false;
+bool   pendingImpact    = false;   // remembers impact during heartbeat upload
+String triggerReason    = "";
+
+// ── STATE ─────────────────────────────────────────────────────
 Adafruit_ADXL375 accel = Adafruit_ADXL375(12345);
+HardwareSerial   modemSerial(1);
 
-float currentX = 0, currentY = 0, currentZ = 0, currentTotal = 0;
-float peakX    = 0, peakY    = 0, peakZ    = 0, peakTotal    = 0;
-unsigned long sampleCount = 0;
-unsigned long lastPrint   = 0;
-
-// ── MODEM STATE ───────────────────────────────────────────────
-HardwareSerial modemSerial(1);
 bool modemReady        = false;
 bool gprsConnected     = false;
 bool apiSyncInProgress = false;
 
-// ── UPLOAD STATS ──────────────────────────────────────────────
-unsigned long uploadCount      = 0;
-unsigned long uploadSuccess    = 0;
+// Live readings
+float liveX = 0, liveY = 0, liveZ = 0, liveTotal = 0;
+
+// Peak readings
+float peakX = 0, peakY = 0, peakZ = 0, peakTotal = 0;
+unsigned long sampleCount = 0;
+
+// Snapshot at upload time
+float lastPeakSent = 0;
+
+// Classification
+bool   accidentDetected = false;
+String accidentType     = "";
+String impactLevel      = "";
+
+// Timing
+unsigned long lastUpload    = 0;
+unsigned long lastStatus    = 0;
+unsigned long lastPeakDecay = 0;
+
+// Stats
+unsigned long uploadCount   = 0;
+unsigned long uploadSuccess = 0;
 int           consecutiveFails = 0;
-
-// ══════════════════════════════════════════════════════════════
-//  HELPERS
-// ══════════════════════════════════════════════════════════════
-String classifyImpact(float g) {
-  if (g > THRESH_EXTREME) return "EXTREME>100g";
-  if (g > THRESH_HIGH)    return "HIGH>50g";
-  if (g > THRESH_MEDIUM)  return "MEDIUM>25g";
-  if (g > THRESH_LOW)     return "LOW>8g";
-  return "NONE";
-}
-
-String bar(float g, float maxG = 100.0, int width = 30) {
-  int filled = constrain((int)((g / maxG) * width), 0, width);
-  String b = "[";
-  for (int i = 0; i < width; i++) b += (i < filled) ? "#" : "-";
-  b += "]";
-  return b;
-}
-
-void resetPeak() {
-  peakX = currentX;
-  peakY = currentY;
-  peakZ = currentZ;
-  peakTotal = currentTotal;
-  sampleCount = 0;
-}
 
 // ══════════════════════════════════════════════════════════════
 //  MODEM HELPERS
@@ -106,8 +110,12 @@ String sendATCommand(String cmd, unsigned long timeout = 1000) {
   return readModemResponse(timeout);
 }
 
+// ══════════════════════════════════════════════════════════════
+//  MODEM SETUP
+// ══════════════════════════════════════════════════════════════
 void setupModem() {
-  Serial.println("\nInitializing SIM A7670E...");
+  Serial.println("Initializing SIM A7670E...");
+
   pinMode(MODEM_PWR_PIN,   OUTPUT);
   pinMode(MODEM_DTR_PIN,   OUTPUT);
   pinMode(MODEM_RESET_PIN, OUTPUT);
@@ -143,49 +151,63 @@ void setupModem() {
     delay(2000);
   }
   if (!modemReady) { Serial.println("FAILED"); return; }
-  Serial.println("✅ Modem ready");
+
+  String csq = sendATCommand("AT+CSQ", 1000);
+  Serial.print("  . Signal: "); Serial.println(csq);
+  Serial.println("✅ Modem ready\n");
 }
 
 bool connectGPRS() {
-  Serial.println("Connecting GPRS...");
+  Serial.println("Connecting to GPRS...");
   if (!modemReady) return false;
   sendATCommand("AT+CGATT=1", 2000);
   sendATCommand("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"", 2000);
   Serial.print("  . Activating... ");
   if (sendATCommand("AT+CGACT=1,1", 10000).indexOf("OK") >= 0) {
     if (sendATCommand("AT+CGPADDR=1", 2000).indexOf("+CGPADDR") >= 0) {
-      Serial.println("OK"); gprsConnected = true; return true;
+      Serial.println("OK\n"); gprsConnected = true; return true;
     }
   }
-  Serial.println("FAILED"); return false;
-}
-
-void modemWatchdog() {
-  if (consecutiveFails < WATCHDOG_THRESHOLD) return;
-  Serial.println("\n⚠️  Watchdog — resetting modem...");
-  sendATCommand("AT+HTTPTERM", 1000);
-  digitalWrite(MODEM_RESET_PIN, HIGH); delay(500);
-  digitalWrite(MODEM_RESET_PIN, LOW);  delay(8000);
-  modemReady = false; gprsConnected = false;
-  for (int i = 0; i < 10; i++) {
-    String r = sendATCommand("AT+CREG?", 2000);
-    if (r.indexOf("+CREG: 0,1") >= 0 || r.indexOf("+CREG: 0,5") >= 0) {
-      modemReady = true; break;
-    }
-    delay(2000);
-  }
-  if (modemReady) connectGPRS();
-  consecutiveFails = 0;
-  Serial.println("✅ Watchdog reset complete");
+  Serial.println("FAILED\n"); return false;
 }
 
 // ══════════════════════════════════════════════════════════════
-//  JSON + HTTP POST
+//  CLASSIFY IMPACT
 // ══════════════════════════════════════════════════════════════
-String buildJSON() {
-  String level = classifyImpact(peakTotal);
-  bool   isAcc = (peakTotal > THRESH_MEDIUM);
+void classifyImpact() {
+  if (peakTotal > ADXL375_EXTREME_THRESHOLD) {
+    accidentType = "CATASTROPHIC_IMPACT"; impactLevel = "EXTREME"; accidentDetected = true;
+  } else if (peakTotal > ADXL375_HIGH_THRESHOLD) {
+    accidentType = "SEVERE_IMPACT";       impactLevel = "HIGH";    accidentDetected = true;
+  } else if (peakTotal > ADXL375_MEDIUM_THRESHOLD) {
+    accidentType = "IMPACT_COLLISION";    impactLevel = "MEDIUM";  accidentDetected = true;
+  } else if (peakTotal > ADXL375_LOW_THRESHOLD) {
+    accidentType = "LOW_IMPACT";          impactLevel = "LOW";     accidentDetected = false;
+  } else {
+    accidentType = ""; impactLevel = ""; accidentDetected = false;
+  }
+}
 
+void resetPeakWindow() {
+  peakX = 0;
+  peakY = 0;
+  peakZ = 0;
+  peakTotal = 0;
+  sampleCount = 0;
+
+}
+
+void decayPeak() {
+  unsigned long now = millis();
+  if (now - lastPeakDecay < PEAK_DECAY_INTERVAL) return;
+  lastPeakDecay = now;
+  if (peakTotal > 0) peakTotal *= 0.5f;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  JSON BUILDER
+// ══════════════════════════════════════════════════════════════
+String buildTelemetryJSON() {
   String json = "{";
   json += "\"deviceId\":\"" + DEVICE_ID + "\",";
   json += "\"latitude\":0,\"longitude\":0,\"altitude\":0,";
@@ -201,16 +223,19 @@ String buildJSON() {
   json += "\"totalGyro\":0,\"pitchAngle\":0,\"rollAngle\":0,";
   json += "\"vibration\":false,\"satellites\":0,\"hdop\":0,";
   json += "\"fixQuality\":\"TEST_MODE\",";
-  json += "\"accidentDetected\":" + String(isAcc ? "true" : "false");
-  if (peakTotal > THRESH_LOW) {
-    json += ",\"accidentType\":\"" + level + "\",";
-    json += "\"impactLevel\":\"" + level + "\",";
-    json += "\"maxImpact\":"     + String(peakTotal, 1);
+  json += "\"accidentDetected\":" + String(accidentDetected ? "true" : "false");
+  if (accidentDetected || peakTotal > ADXL375_LOW_THRESHOLD) {
+    json += ",\"accidentType\":\"" + accidentType + "\",";
+    json += "\"impactLevel\":\""   + impactLevel  + "\",";
+    json += "\"maxImpact\":"       + String(peakTotal, 1);
   }
   json += "}}";
   return json;
 }
 
+// ══════════════════════════════════════════════════════════════
+//  HTTP POST
+// ══════════════════════════════════════════════════════════════
 bool httpPOST(String jsonData) {
   if (!gprsConnected || apiSyncInProgress) return false;
   apiSyncInProgress = true;
@@ -251,36 +276,81 @@ bool httpPOST(String jsonData) {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  WATCHDOG
+// ══════════════════════════════════════════════════════════════
+void modemWatchdog() {
+  if (consecutiveFails < WATCHDOG_THRESHOLD) return;
+  Serial.println("\n⚠️  20 consecutive failures — resetting modem...");
+  sendATCommand("AT+HTTPTERM", 1000);
+  digitalWrite(MODEM_RESET_PIN, HIGH); delay(500);
+  digitalWrite(MODEM_RESET_PIN, LOW);  delay(8000);
+  modemReady = false; gprsConnected = false;
+  for (int i = 0; i < 10; i++) {
+    String r = sendATCommand("AT+CREG?", 2000);
+    if (r.indexOf("+CREG: 0,1") >= 0 || r.indexOf("+CREG: 0,5") >= 0) {
+      modemReady = true; break;
+    }
+    delay(2000);
+  }
+  if (modemReady) connectGPRS();
+  consecutiveFails = 0;
+  Serial.println("✅ Modem watchdog reset complete\n");
+}
+
+// ══════════════════════════════════════════════════════════════
+//  STATUS PRINT
+// ══════════════════════════════════════════════════════════════
+void printStatus() {
+  Serial.print("│ Live:"); Serial.print(liveTotal, 2);
+  Serial.print("g │ CurPk:"); Serial.print(peakTotal, 2);
+  Serial.print("g │ LastSent:"); Serial.print(lastPeakSent, 2);
+  Serial.print("g │ X:"); Serial.print(liveX, 1);
+  Serial.print(" Y:"); Serial.print(liveY, 1);
+  Serial.print(" Z:"); Serial.print(liveZ, 1);
+  Serial.print(" │ Smpls:"); Serial.print(sampleCount);
+  Serial.print(" │ "); Serial.print(accidentType.length() > 0 ? accidentType : "NONE");
+  Serial.print(" │ "); Serial.print(uploadSuccess);
+  Serial.print("/"); Serial.print(uploadCount);
+  Serial.print(" (fails:"); Serial.print(consecutiveFails);
+  Serial.println(") │");
+  if (lastPeakSent > 16.0)
+    Serial.println("  ✅ Peak >16g — NOT clipping like ADXL345");
+}
+
+// ══════════════════════════════════════════════════════════════
 //  setup()
 // ══════════════════════════════════════════════════════════════
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-
-  Serial.println("\n============================================");
-  Serial.println("   ADXL375 REAL-TIME UPLOAD TEST");
-  Serial.println("   800 Hz capture · 500ms send · ±200g");
-  Serial.println("============================================");
+  delay(2000);
+  Serial.println("\n╔══════════════════════════════════════════════════════╗");
+  Serial.println("║  L-GUARD ADXL375 WIRELESS TEST v3.0                 ║");
+  Serial.println("║  800 Hz · Impact priority · 10s heartbeat · ±200g   ║");
+  Serial.println("╚══════════════════════════════════════════════════════╝\n");
 
   Wire.begin(21, 22);
-  Serial.print("ADXL375 ... ");
+  Serial.print("ADXL375 (±200g)... ");
   if (!accel.begin(ADXL375_ADDRESS)) {
-    Serial.println("FAILED — check wiring");
-    while (1) delay(500);
+    Serial.println("FAILED"); while (1) delay(500);
   }
   accel.setDataRate(ADXL343_DATARATE_800_HZ);
   Serial.println("OK — 800 Hz ±200g\n");
 
   setupModem();
-  if (modemReady) connectGPRS();
+  if (modemReady) {
+    if (!connectGPRS()) Serial.println("⚠️  GPRS failed — cannot upload");
+  }
 
-  Serial.println("\nStreaming starts now.");
-  Serial.println("Peak captures between 500ms windows.");
-  Serial.println("Peak resets to current live after each successful upload.\n");
+  Serial.println("Upload priority:");
+  Serial.println("  1st — Impact >8g  (immediate, interrupts heartbeat retry)");
+  Serial.println("  2nd — Heartbeat every 10s when no impact");
+  Serial.println("\nFree-running peak capture at 800 Hz.");
+  Serial.println("Streaming starts in 3s.\n");
+  delay(3000);
 
-  lastPrint = millis();
+  lastPeakDecay = millis();
+  lastUpload    = millis();
 }
-
 // ══════════════════════════════════════════════════════════════
 //  loop()
 // ══════════════════════════════════════════════════════════════
@@ -288,76 +358,113 @@ void loop() {
   // 1. Read sensor — free-running 800 Hz
   sensors_event_t event;
   accel.getEvent(&event);
-
-  currentX     = event.acceleration.x * MPS2_TO_G;
-  currentY     = event.acceleration.y * MPS2_TO_G;
-  currentZ     = event.acceleration.z * MPS2_TO_G;
-  currentTotal = sqrt(currentX*currentX + currentY*currentY + currentZ*currentZ);
-
+  liveX     = event.acceleration.x * MPS2_TO_G;
+  liveY     = event.acceleration.y * MPS2_TO_G;
+  liveZ     = event.acceleration.z * MPS2_TO_G;
+  liveTotal = sqrt(liveX*liveX + liveY*liveY + liveZ*liveZ);
   sampleCount++;
 
   // 2. Update peak
-  if (currentTotal > peakTotal) {
-    peakTotal = currentTotal;
-    peakX     = currentX;
-    peakY     = currentY;
-    peakZ     = currentZ;
+  if (liveTotal > peakTotal) {
+    peakTotal = liveTotal;
+    peakX = liveX; peakY = liveY; peakZ = liveZ;
   }
 
   unsigned long now = millis();
 
-  // 3. Every 500ms — print + upload
-  if (now - lastPrint >= PRINT_AND_UPLOAD_INTERVAL) {
-    lastPrint = now;
+  // 3. Detect threshold crossing
+if (!thresholdCrossed && liveTotal > ADXL375_LOW_THRESHOLD) {
 
-    // Print (same style as standalone test)
-    Serial.println("--------------------------------------------------");
-    Serial.print("Current X:"); Serial.print(currentX, 2);
-    Serial.print("g Y:");       Serial.print(currentY, 2);
-    Serial.print("g Z:");       Serial.print(currentZ, 2);
-    Serial.print("g | Total:"); Serial.print(currentTotal, 2); Serial.println("g");
+    thresholdCrossed = true;
+    pendingImpact = true;   // keep accident remembered
 
-    Serial.print("PEAK    X:"); Serial.print(peakX, 2);
-    Serial.print("g Y:");       Serial.print(peakY, 2);
-    Serial.print("g Z:");       Serial.print(peakZ, 2);
-    Serial.print("g | Peak:"); Serial.print(peakTotal, 2); Serial.println("g");
+    if      (peakTotal > ADXL375_EXTREME_THRESHOLD) triggerReason = "EXTREME>100g";
+    else if (peakTotal > ADXL375_HIGH_THRESHOLD)    triggerReason = "HIGH>50g";
+    else if (peakTotal > ADXL375_MEDIUM_THRESHOLD)  triggerReason = "MEDIUM>25g";
+    else                                            triggerReason = "LOW>8g";
 
-    Serial.print("Level: "); Serial.println(classifyImpact(peakTotal));
-    Serial.print("Bar: ");
-    Serial.print(bar(peakTotal));
-    Serial.print(" "); Serial.print(peakTotal, 1); Serial.println("g");
-    Serial.print("Samples in window: "); Serial.println(sampleCount);
+    Serial.println("\n⚡ THRESHOLD CROSSED: " + triggerReason +
+                   " (" + String(peakTotal, 2) + "g)");
+}
 
-    if (peakTotal > 16.0)
-      Serial.println("✅ Peak >16g — NOT behaving like ADXL345");
+  // 4. Upload logic
+  bool heartbeatDue = (now - lastUpload >= HEARTBEAT_INTERVAL);
+  bool minGapMet    = (now - lastUpload >= MIN_GAP_BETWEEN_UPLOADS);
+  bool impactReady  = pendingImpact;
 
-    // Upload
-    if (gprsConnected && !apiSyncInProgress) {
-      uploadCount++;
-      Serial.print("📤 #"); Serial.print(uploadCount);
-      Serial.print(" → ");
+  if (minGapMet && gprsConnected && !apiSyncInProgress &&
+      (impactReady || heartbeatDue)) {
 
-      if (httpPOST(buildJSON())) {
-        uploadSuccess++;
-        consecutiveFails = 0;
-        Serial.print("✅ (");
-        Serial.print(uploadSuccess); Serial.print("/");
-        Serial.print(uploadCount); Serial.println(")");
-        // Reset peak to current live — fresh window
-        resetPeak();
-      } else {
-        consecutiveFails++;
-        Serial.print("❌ streak:"); Serial.print(consecutiveFails);
-        Serial.println(" — peak kept");
+    uploadCount++;
+    lastPeakSent = peakTotal;
+    classifyImpact();
+    String payload  = buildTelemetryJSON();
+    bool wasImpact = pendingImpact;
+    String label    = impactReady ? triggerReason : "HEARTBEAT";
+
+    Serial.print("\n📤 #"); Serial.print(uploadCount);
+    Serial.print(" ["); Serial.print(label);
+    Serial.print("] peak:"); Serial.print(lastPeakSent, 2);
+    Serial.print("g live:"); Serial.print(liveTotal, 2);
+    Serial.print("g → ");
+
+    bool ok = false;
+    for (int attempt = 1; attempt <= UPLOAD_RETRIES; attempt++) {
+      if (httpPOST(payload)) {
+        ok = true;
+        if (attempt > 1) {
+          Serial.print("(retry "); Serial.print(attempt); Serial.print(") ");
+        }
+        break;
       }
-    } else {
-      Serial.println("⚠️  No GPRS — skipping upload");
-      resetPeak();   // still reset for display purposes
+
+      //Here if a LOWER impact arrives while retrying a heartbeat — abort
+  if (!wasImpact && pendingImpact &&
+    peakTotal > ADXL375_LOW_THRESHOLD) {
+
+    Serial.print("⚡ IMPACT DURING HEARTBEAT — saved for next upload ");
+    break;
+}
+
+      if (attempt < UPLOAD_RETRIES) {
+        Serial.print("retry... ");
+        delay(200);
+      }
     }
+
+    if (ok) {
+      uploadSuccess++;
+      consecutiveFails = 0;
+      Serial.print("✅ ("); Serial.print(uploadSuccess);
+      Serial.print("/"); Serial.print(uploadCount); Serial.println(")");
+    } else {
+      consecutiveFails++;
+      Serial.print("❌ (streak:"); Serial.print(consecutiveFails);
+      Serial.println(")");
+    }
+// After ANY successful upload,
+// clear old peak so it cannot trigger again
+
+if (ok) {
+    resetPeakWindow();
+
+    Serial.println("✅ Peak window cleared");
+
+}
+// clear flags
+thresholdCrossed = false;
+pendingImpact = false;
+triggerReason = "";
+lastUpload = now;
   }
-
-  // 4. Watchdog
+  // 5. Status print every 1s
+  if (now - lastStatus >= STATUS_PRINT) {
+    printStatus();
+    lastStatus = now;
+  }
+  // 6. Watchdog
   modemWatchdog();
-
+  // 7. Peak safety decay
+  decayPeak();
   // NO delay() — 800 Hz free-running
 }
